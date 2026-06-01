@@ -1,0 +1,175 @@
+package handler
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"m3u8-downloader-web/model"
+	"m3u8-downloader-web/service"
+	"m3u8-downloader-web/storage"
+)
+
+type SettingsHandler struct {
+	storage *storage.SQLiteStorage
+}
+
+func NewSettingsHandler(storage *storage.SQLiteStorage) *SettingsHandler {
+	return &SettingsHandler{
+		storage: storage,
+	}
+}
+
+func (h *SettingsHandler) GetSettings(w http.ResponseWriter, r *http.Request) {
+	settings, err := h.storage.GetSettings()
+	if err != nil {
+		h.sendError(w, http.StatusInternalServerError, "获取设置失败")
+		return
+	}
+	h.sendSuccess(w, settings)
+}
+
+func (h *SettingsHandler) TestWebDAV(w http.ResponseWriter, r *http.Request) {
+	var config model.Settings
+	if err := json.NewDecoder(r.Body).Decode(&config); err != nil {
+		h.sendError(w, http.StatusBadRequest, "无效的请求体")
+		return
+	}
+
+	webdavConfig := service.WebDAVConfig{
+		Enabled:  true,
+		URL:      config.WebDAVURL,
+		Username: config.WebDAVUsername,
+		Password: config.WebDAVPassword,
+	}
+
+	webdavService := service.NewWebDAVService(webdavConfig)
+	err := webdavService.TestConnection()
+	if err != nil {
+		h.sendError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	h.sendSuccess(w, map[string]string{"message": "连接测试成功"})
+}
+
+func (h *SettingsHandler) ListWebDAVDir(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		URL      string `json:"url"`
+		Username string `json:"username"`
+		Password string `json:"password"`
+		Path     string `json:"path"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.sendError(w, http.StatusBadRequest, "无效的请求体")
+		return
+	}
+
+	webdavConfig := service.WebDAVConfig{
+		Enabled:  true,
+		URL:      req.URL,
+		Username: req.Username,
+		Password: req.Password,
+	}
+
+	webdavService := service.NewWebDAVService(webdavConfig)
+	files, err := webdavService.ReadDir(req.Path)
+	if err != nil {
+		h.sendError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	type FileItem struct {
+		Name  string `json:"name"`
+		IsDir bool   `json:"isDir"`
+		Path  string `json:"path"`
+	}
+
+	var result = []FileItem{}
+	for _, f := range files {
+		if f.IsDir() {
+			itemPath := req.Path
+			if itemPath == "" || itemPath == "/" {
+				itemPath = "/" + f.Name()
+			} else {
+				if itemPath[len(itemPath)-1] != '/' {
+					itemPath += "/"
+				}
+				itemPath += f.Name()
+			}
+
+			result = append(result, FileItem{
+				Name:  f.Name(),
+				IsDir: f.IsDir(),
+				Path:  itemPath,
+			})
+		}
+	}
+
+	h.sendSuccess(w, result)
+}
+
+func (h *SettingsHandler) ClearCache(w http.ResponseWriter, r *http.Request) {
+	pwd, err := os.Getwd()
+	if err != nil {
+		h.sendError(w, http.StatusInternalServerError, "获取工作目录失败")
+		return
+	}
+
+	files, err := os.ReadDir(pwd)
+	if err != nil {
+		h.sendError(w, http.StatusInternalServerError, "读取目录失败")
+		return
+	}
+
+	count := 0
+	for _, f := range files {
+		if f.IsDir() && strings.HasPrefix(f.Name(), "download_") {
+			err := os.RemoveAll(filepath.Join(pwd, f.Name()))
+			if err == nil {
+				count++
+			}
+		}
+	}
+
+	h.sendSuccess(w, map[string]interface{}{
+		"message": fmt.Sprintf("已成功清除 %d 个缓存文件夹", count),
+		"count":   count,
+	})
+}
+
+func (h *SettingsHandler) SaveSettings(w http.ResponseWriter, r *http.Request) {
+	var newSettings model.Settings
+	if err := json.NewDecoder(r.Body).Decode(&newSettings); err != nil {
+		h.sendError(w, http.StatusBadRequest, "无效的请求体")
+		return
+	}
+
+	if err := h.storage.SaveSettings(&newSettings); err != nil {
+		h.sendError(w, http.StatusInternalServerError, "保存设置失败")
+		return
+	}
+
+	h.sendSuccess(w, newSettings)
+}
+
+func (h *SettingsHandler) sendSuccess(w http.ResponseWriter, data interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(model.APIResponse{
+		Code:    200,
+		Message: "success",
+		Data:    data,
+	})
+}
+
+func (h *SettingsHandler) sendError(w http.ResponseWriter, status int, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(model.APIResponse{
+		Code:    status,
+		Message: message,
+	})
+}
