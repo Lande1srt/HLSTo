@@ -9,7 +9,7 @@
 
 >需要你有一台对国内连接友好的服务器（不然光速下载，然后龟速中转到webdav服务器），不推荐国内需要备案的服务器，小心被请去喝茶，建议使用国外的大陆网络优化服务器，下载后的资源仅自己观赏，避免产生对应法律问题。关于m3u8地址可以通过某些下载器或浏览器扩展抓取（常用）。
 
-本工具仅提供基于学术研究的相关下载功能，如由使用者产生相关法律问题与此工具无关。
+本工具仅提供基于学术研究的相关下载功能，如由使用者产生相关法律问题与此工具及相关开发者无关。
 
 ## 下载流程
 
@@ -93,41 +93,6 @@ go run main.go
    CGO_ENABLED=1 go build -o m3u8-downloader-web main.go
    ```
 4. 运行生成的可执行文件即可。
-
-## 📁 项目结构
-
-```
-HLSTo/
-├── frontend/                    # Vue 3 前端源码
-│   ├── src/
-│   │   ├── api/                # API 请求封装
-│   │   ├── stores/             # Pinia 状态管理
-│   │   ├── views/              # 页面组件
-│   │   ├── router/             # 路由配置
-│   │   └── assets/             # 静态资源
-│   ├── package.json
-│   ├── vite.config.ts
-│   └── tailwind.config.js
-├── backend/                     # Go 后端服务 (部署时仅需此目录)
-│   ├── handler/                # HTTP 处理器
-│   │   ├── auth.go             # 认证处理
-│   │   ├── download.go         # 下载控制
-│   │   ├── settings.go         # 设置管理
-│   │   └── task.go             # 任务管理
-│   ├── service/                # 业务逻辑层
-│   │   ├── downloader.go       # 下载核心逻辑
-│   │   ├── task_manager.go     # 任务管理器
-│   │   └── webdav.go           # WebDAV 上传
-│   ├── model/                  # 数据模型
-│   ├── storage/                # 数据存储 (SQLite)
-│   ├── websocket/              # WebSocket 处理
-│   ├── static/                 # 前端构建输出 (自动生成)
-│   └── main.go                 # 服务入口
-├── .env.example                # 环境变量示例
-├── Build-Project.ps1           # 生产构建脚本
-├── Start-App.ps1               # 启动控制脚本
-└── Dockerfile                  # Docker 镜像构建
-```
 
 ## API 接口
 
