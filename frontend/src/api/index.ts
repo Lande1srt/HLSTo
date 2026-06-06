@@ -24,7 +24,6 @@ api.interceptors.response.use(
   (error) => {
     if (error.response?.status === 401) {
       localStorage.removeItem('token')
-      // 如果不是登录页，可以考虑跳转，但通常由路由守卫处理
     }
     return Promise.reject(error)
   }

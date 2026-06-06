@@ -141,8 +141,8 @@ func (tm *TaskManager) GetTaskLogs(taskID string) ([]*model.LogEntry, error) {
 }
 
 func (tm *TaskManager) AddLog(taskID, level, message string) {
-	// 按照用户要求：主页日志不写入数据库，仅在内存中通过 WebSocket 实时分发
-	// 如果未来需要历史记录，可以在此处重新启用
+	// 主页日志无必要写入数据库，仅在内存中通过 WebSocket 实时分发
+	// 需要历史记录，可以在此处重新启用
 	/*
 		if tm.storage != nil {
 			go tm.storage.AddLog(taskID, level, message)

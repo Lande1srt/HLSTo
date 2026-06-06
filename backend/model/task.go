@@ -30,7 +30,7 @@ type Task struct {
 	ThreadCount        int        `json:"threadCount"`
 	HostType           string     `json:"hostType"` 
 	Cookie             string     `json:"cookie"` 
-	Referer            string     `json:"referer"` // 自定义主机名/Referer
+	Referer            string     `json:"referer"` 
 	AutoClear          bool       `json:"autoClear"`
 	SavePath           string     `json:"savePath"`
 	EnableWebDAV       bool       `json:"enableWebDAV"`
@@ -47,7 +47,7 @@ type DownloadRequest struct {
 	OutputName      string `json:"outputName"`
 	HostType        string `json:"hostType"` 
 	Cookie          string `json:"cookie"` 
-	Referer         string `json:"referer"` // 自定义主机名/Referer
+	Referer         string `json:"referer"` 
 	AutoClear       bool   `json:"autoClear"`
 	SavePath        string `json:"savePath"`
 	EnableWebDAV    bool   `json:"enableWebDAV"`
@@ -77,7 +77,7 @@ type Settings struct {
 	WebDAVRemoteDir    string `json:"webDAVRemoteDir"`
 	DeleteAfterUpload  bool   `json:"deleteAfterUpload"` 
 	TaskSortOrder      string `json:"taskSortOrder"` // "desc" or "asc"
-	DefaultReferer     string `json:"defaultReferer"` // 自定义主机名/Referer
+	DefaultReferer     string `json:"defaultReferer"` 
 }
 
 type WebSocketMessage struct {

@@ -25,9 +25,6 @@ func NewAuthHandler() *AuthHandler {
 
 func InitAuth() {
 	// 系统环境变量优先级高于 .env
-	// 如果已经在运行前通过 export/set 设置了环境变量，它们会由操作系统直接加载
-	// 此处逻辑保持不变，因为 os.Getenv 会自动获取最新的环境变量（包括 godotenv 注入的）
-	// godotenv.Load() 默认不会覆盖已存在的环境变量，这已经符合“系统环境变量优先级更高”的原则
 	USERNAME = os.Getenv("AUTH_USERNAME")
 	PASSWORD = os.Getenv("AUTH_PASSWORD")
 	

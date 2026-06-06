@@ -25,7 +25,6 @@ func NewWebSocketHandler(wsManager *WebSocketManager) *WebSocketHandler {
 
 func (h *WebSocketHandler) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	taskID := r.URL.Query().Get("taskId")
-	// taskId can be empty for global updates (task list page)
 
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
