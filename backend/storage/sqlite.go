@@ -10,7 +10,7 @@ import (
 
 	"m3u8-downloader-web/model"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "modernc.org/sqlite"
 )
 
 type SQLiteStorage struct {
@@ -29,7 +29,7 @@ func NewSQLiteStorage() (*SQLiteStorage, error) {
 	dbPath := filepath.Join(pwd, "downloader.db")
 	log.Printf("[SQLite] Database path: %s\n", dbPath)
 	
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		log.Printf("[SQLite] Error opening database: %v\n", err)
 		return nil, err
@@ -103,7 +103,6 @@ func createTables(db *sql.DB) error {
 		return err
 	}
 
-	// 简单的数据库迁移：检查并添加缺失的列
 	migrateTasksTable(db)
 	migrateSettingsTable(db)
 
@@ -131,7 +130,6 @@ func createTables(db *sql.DB) error {
 		return err
 	}
 
-	// 初始化默认设置（如果不存在）
 	var count int
 	err = db.QueryRow("SELECT COUNT(*) FROM settings WHERE id = 1").Scan(&count)
 	if err == nil && count == 0 {
@@ -161,7 +159,6 @@ func migrateTasksTable(db *sql.DB) {
 		query := fmt.Sprintf("ALTER TABLE tasks ADD COLUMN %s %s", col, colType)
 		_, err := db.Exec(query)
 		if err != nil {
-			// 如果列已经存在，报错是正常的，忽略它
 			continue
 		}
 		log.Printf("[SQLite] Added column %s to tasks table\n", col)
