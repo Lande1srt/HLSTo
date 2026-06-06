@@ -56,7 +56,7 @@ export const downloadAPI = {
 
   upload: (taskId: string, config?: Record<string, unknown>) => api.post('/download/upload', { taskId, config }),
 
-  analyze: (url: string) => api.post('/download/analyze', { url })
+  analyze: (url: string, referer?: string, cookie?: string) => api.post('/download/analyze', { url, referer, cookie })
 }
 
 export const taskAPI = {
@@ -77,7 +77,12 @@ export const settingsAPI = {
   listWebDAVDir: (data: { url: string; username?: string; password?: string; path: string }) =>
     api.post('/settings/webdav/list', data),
 
-  clearCache: () => api.post('/settings/clear-cache')
+  clearCache: () => api.post('/settings/clear-cache'),
+
+  getCleanupConfig: () => api.get('/settings/cleanup-config'),
+
+  saveCleanupConfig: (config: { enabled: boolean; interval: number; unit: string }) =>
+    api.post('/settings/cleanup-config', config)
 }
 
 export default api

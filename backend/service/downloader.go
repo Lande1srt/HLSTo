@@ -4,14 +4,15 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"net/url"
 	"os"
 	"path"
 	"path/filepath"
 	"runtime"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -20,13 +21,12 @@ import (
 	"m3u8-downloader-web/websocket"
 
 	"github.com/google/uuid"
-	"github.com/levigross/grequests"
 	"github.com/yapingcat/gomedia/go-mp4"
 	"github.com/yapingcat/gomedia/go-mpeg2"
 )
 
 const (
-	HEAD_TIMEOUT     = 5 * time.Second
+	HEAD_TIMEOUT     = 15 * time.Second
 	TS_NAME_TEMPLATE = "%05d.ts"
 )
 
@@ -103,6 +103,7 @@ func (ds *DownloaderService) StartDownload(req model.DownloadRequest) (*model.Ta
 		ThreadCount: req.ThreadCount,
 		HostType:    req.HostType,
 		Cookie:      req.Cookie,
+		Referer:     req.Referer,
 		AutoClear:   req.AutoClear,
 		SavePath:    req.SavePath,
 		CreatedAt:   time.Now(),
@@ -154,8 +155,13 @@ func (ds *DownloaderService) download(taskID string, req model.DownloadRequest) 
 		return
 	}
 	if req.SavePath != "" {
-		pwd = req.SavePath
+		// 防御路径穿越：清理并转换为绝对路径，确保在合法范围内
+		cleanPath := filepath.Clean(req.SavePath)
+		pwd = cleanPath
 	}
+
+	// 过滤文件名中的非法字符
+	req.OutputName = sanitizeFileName(req.OutputName)
 
 	timestamp := time.Now().Format("0601020304")
 	downloadDir := filepath.Join(pwd, fmt.Sprintf("download_%s", timestamp))
@@ -165,82 +171,116 @@ func (ds *DownloaderService) download(taskID string, req model.DownloadRequest) 
 		os.MkdirAll(cacheDir, os.ModePerm)
 	}
 
-	ds.sendStatus(taskID, model.StatusDownloading, "正在解析 m3u8...")
+	ds.sendStatus(taskID, model.StatusDownloading, "正在分析下载地址...")
 
-	m3u8Host := ds.getHost(req.URL, req.HostType)
-	m3u8Body := ds.getM3u8Body(req.URL)
-	if m3u8Body == "" {
-		ds.sendStatus(taskID, model.StatusFailed, "无法获取 m3u8 内容，请检查 URL 是否有效")
-		return
-	}
+	isM3U8 := strings.Contains(strings.ToLower(req.URL), ".m3u8")
+	var mv string
 
-	key := ds.getM3u8Key(m3u8Host, m3u8Body)
-	if key != "" {
-		ds.sendLog(taskID, "info", fmt.Sprintf("待解密 ts 文件 key: %s", key))
-	}
-
-	tsList := ds.getTsList(m3u8Host, m3u8Body)
-	ds.sendLog(taskID, "info", fmt.Sprintf("待下载 ts 文件数量: %d", len(tsList)))
-
-	ds.taskManager.mu.Lock()
-	if task, exists := ds.taskManager.tasks[taskID]; exists {
-		task.TotalSegments = len(tsList)
-	}
-	ds.taskManager.mu.Unlock()
-
-	if !ds.downloader(taskID, req.ThreadCount, key, cacheDir, tsList, ctrl) {
-		// Task was stopped or failed
-		return
-	}
-
-	if ok := ds.checkTsDownDir(taskID, cacheDir, tsList); !ok {
-		ds.sendStatus(taskID, model.StatusFailed, "合并前检查失败: 文件不完整")
-		return
-	}
-
-	downloadFinished = true
-	<-ds.downloadSem // 下载阶段结束，释放信号量
-
-	// --- 阶段 2: 合并 ---
-	ds.sendStatus(taskID, model.StatusMerging, "正在等待合并队列...")
-	ds.sendProgress(taskID, 0, "等待队列", 0, 0)
-	select {
-	case ds.mergeSem <- struct{}{}:
-		// 获得合并权
-	case <-ctrl.stopped:
-		return
-	}
-
-	// 确保合并权释放
-	mergeFinished := false
-	defer func() {
-		if !mergeFinished {
-			<-ds.mergeSem
+	if isM3U8 {
+		m3u8Host := ds.getHost(req.URL, req.HostType)
+		m3u8Body := ds.getM3u8Body(req.URL, req.Referer, req.Cookie)
+		if m3u8Body == "" {
+			ds.sendStatus(taskID, model.StatusFailed, "无法获取 m3u8 内容，请检查 URL 是否有效")
+			return
 		}
-	}()
 
-	ds.sendStatus(taskID, model.StatusMerging, "正在合并文件...")
-	ds.sendProgress(taskID, 0, "开始合并", 0, 0)
-	mv := ds.mergeTs(taskID, cacheDir, downloadDir, req.OutputName, ctrl)
+		key := ds.getM3u8Key(m3u8Host, m3u8Body, req.Referer, req.Cookie)
+		if key != "" {
+			ds.sendLog(taskID, "info", fmt.Sprintf("待解密 ts 文件 key: %s", key))
+		}
 
-	if mv == "" {
-		// 说明合并被停止或出错
-		return
+		tsList := ds.getTsList(m3u8Host, m3u8Body)
+		ds.sendLog(taskID, "info", fmt.Sprintf("待下载 ts 文件数量: %d", len(tsList)))
+
+		ds.taskManager.mu.Lock()
+		if task, exists := ds.taskManager.tasks[taskID]; exists {
+			task.TotalSegments = len(tsList)
+		}
+		ds.taskManager.mu.Unlock()
+
+		if !ds.downloader(taskID, req.ThreadCount, key, cacheDir, tsList, ctrl, req.Referer, req.Cookie) {
+			// Task was stopped or failed
+			return
+		}
+
+		if ok := ds.checkTsDownDir(taskID, cacheDir, tsList); !ok {
+			ds.sendStatus(taskID, model.StatusFailed, "合并前检查失败: 文件不完整")
+			return
+		}
+
+		downloadFinished = true
+		<-ds.downloadSem // 下载阶段结束，释放信号量
+
+		// --- 阶段 2: 合并 ---
+		ds.sendStatus(taskID, model.StatusMerging, "正在等待合并队列...")
+		ds.sendProgress(taskID, 0, "等待队列", 0, 0)
+		select {
+		case ds.mergeSem <- struct{}{}:
+			// 获得合并权
+		case <-ctrl.stopped:
+			return
+		}
+
+		// 确保合并权释放
+		mergeFinished := false
+		defer func() {
+			if !mergeFinished {
+				<-ds.mergeSem
+			}
+		}()
+
+		ds.sendStatus(taskID, model.StatusMerging, "正在合并文件...")
+		ds.sendProgress(taskID, 0, "开始合并", 0, 0)
+		mv = ds.mergeTs(taskID, cacheDir, downloadDir, req.OutputName, ctrl)
+
+		if mv == "" {
+			// 说明合并被停止或出错
+			return
+		}
+
+		if req.AutoClear {
+			os.RemoveAll(cacheDir)
+		}
+
+		mergeFinished = true
+		<-ds.mergeSem // 合并阶段结束，释放信号量
+	} else {
+		// --- 阶段 1: 直接下载通用文件 ---
+		// 在正式下载前再次校验是否为视频文件
+		if !ds.checkIsVideoURL(req.URL, req.Referer, req.Cookie) {
+			ds.sendLog(taskID, "error", "不支持的下载类型，仅支持主流视频格式")
+			ds.sendStatus(taskID, model.StatusFailed, "不支持的视频格式")
+			return
+		}
+
+		ds.sendStatus(taskID, model.StatusDownloading, "正在下载通用视频文件...")
+		// 自动推断扩展名
+		ext := ".mp4"
+		if u, err := url.Parse(req.URL); err == nil {
+			pathExt := filepath.Ext(u.Path)
+			if pathExt != "" {
+				ext = pathExt
+			}
+		}
+		mv = filepath.Join(downloadDir, req.OutputName+ext)
+
+		if !ds.downloadSingleFile(taskID, req.URL, mv, req.Referer, req.Cookie, ctrl) {
+			return
+		}
+
+		downloadFinished = true
+		<-ds.downloadSem // 下载阶段结束，释放信号量
+		
+		// 通用文件跳过合并阶段
+		ds.sendLog(taskID, "info", "通用文件下载完成，跳过合并阶段")
 	}
 
-	// 合并完成后立即保存路径，防止后续上传失败导致路径丢失
+	// 更新输出路径到任务对象
 	ds.taskManager.mu.Lock()
 	if task, exists := ds.taskManager.tasks[taskID]; exists {
 		task.OutputPath = mv
 	}
 	ds.taskManager.mu.Unlock()
-
-	if req.AutoClear {
-		os.RemoveAll(cacheDir)
-	}
-
-	mergeFinished = true
-	<-ds.mergeSem // 合并阶段结束，释放信号量
 
 	// --- 阶段 3: 上传 ---
 	if req.EnableWebDAV && req.WebDAVURL != "" {
@@ -268,7 +308,12 @@ func (ds *DownloaderService) download(taskID string, req model.DownloadRequest) 
 
 		webdavService := NewWebDAVService(webdavConfig)
 
-		err := webdavService.UploadFile(mv, req.OutputName+".mp4", ctrl.stopped, func(downloaded, total int64) {
+		remoteFileName := req.OutputName + ".mp4"
+		if !isM3U8 {
+			remoteFileName = filepath.Base(mv)
+		}
+
+		err := webdavService.UploadFile(mv, remoteFileName, ctrl.stopped, func(downloaded, total int64, speed string) {
 			progress := 0.0
 			if total > 0 {
 				progress = float64(downloaded) / float64(total) * 100
@@ -276,7 +321,7 @@ func (ds *DownloaderService) download(taskID string, req model.DownloadRequest) 
 			// 将字节转换为 KB 以便在前端显示，KB 比较稳妥且能显示更多细节
 			curKB := int(downloaded / 1024)
 			totalKB := int(total / 1024)
-			ds.sendProgress(taskID, progress, "上传中", curKB, totalKB)
+			ds.sendProgress(taskID, progress, speed, curKB, totalKB)
 		})
 
 		if err != nil {
@@ -347,26 +392,73 @@ func (ds *DownloaderService) getHost(Url string, ht string) string {
 	return u.Scheme + "://" + u.Host
 }
 
-func (ds *DownloaderService) getM3u8Body(Url string) string {
-	ro := &grequests.RequestOptions{
-		UserAgent:      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_13_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/79.0.3945.88 Safari/537.36",
-		RequestTimeout: HEAD_TIMEOUT,
-		Headers: map[string]string{
-			"Connection":      "keep-alive",
-			"Accept":          "*/*",
-			"Accept-Encoding": "*",
-			"Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+func (ds *DownloaderService) getM3u8Body(Url string, referer string, cookie string) string {
+	referer = sanitizeHeader(referer)
+	cookie = sanitizeHeader(cookie)
+	
+	// 使用自定义 http.Client 以便在重定向时保留 Referer 和 Cookie
+	client := &http.Client{
+		Timeout: HEAD_TIMEOUT,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return fmt.Errorf("too many redirects")
+			}
+			// 关键：在重定向请求中手动补回 Referer, Origin 和 Cookie
+			if referer != "" {
+				req.Header.Set("Referer", referer)
+				if u, err := url.Parse(referer); err == nil {
+					req.Header.Set("Origin", u.Scheme+"://"+u.Host)
+				}
+			}
+			if cookie != "" {
+				req.Header.Set("Cookie", cookie)
+			}
+			req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+			return nil
 		},
 	}
 
-	r, err := grequests.Get(Url, ro)
+	req, err := http.NewRequest("GET", Url, nil)
 	if err != nil {
 		return ""
 	}
-	return r.String()
+
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+	req.Header.Set("Connection", "keep-alive")
+	req.Header.Set("Accept", "*/*")
+	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
+
+	if referer != "" {
+		req.Header.Set("Referer", referer)
+		if u, err := url.Parse(referer); err == nil {
+			req.Header.Set("Origin", u.Scheme+"://"+u.Host)
+		}
+	}
+	if cookie != "" {
+		req.Header.Set("Cookie", cookie)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return ""
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return ""
+	}
+	
+	return string(body)
 }
 
-func (ds *DownloaderService) getM3u8Key(host, html string) string {
+func (ds *DownloaderService) getM3u8Key(host, html string, referer string, cookie string) string {
+	referer = sanitizeHeader(referer)
+	cookie = sanitizeHeader(cookie)
 	lines := strings.Split(html, "\n")
 	for _, line := range lines {
 		if strings.Contains(line, "#EXT-X-KEY") {
@@ -379,11 +471,58 @@ func (ds *DownloaderService) getM3u8Key(host, html string) string {
 			if !strings.Contains(line, "http") {
 				keyUrl = fmt.Sprintf("%s/%s", host, keyUrl)
 			}
-			res, err := grequests.Get(keyUrl, nil)
+
+			// 使用自定义 http.Client 以便在重定向时保留 Referer 和 Cookie
+			client := &http.Client{
+				Timeout: HEAD_TIMEOUT,
+				CheckRedirect: func(req *http.Request, via []*http.Request) error {
+					if len(via) >= 10 {
+						return fmt.Errorf("too many redirects")
+					}
+					if referer != "" {
+						req.Header.Set("Referer", referer)
+						if u, err := url.Parse(referer); err == nil {
+							req.Header.Set("Origin", u.Scheme+"://"+u.Host)
+						}
+					}
+					if cookie != "" {
+						req.Header.Set("Cookie", cookie)
+					}
+					req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+					return nil
+				},
+			}
+
+			req, err := http.NewRequest("GET", keyUrl, nil)
+			if err != nil {
+				continue
+			}
+
+			req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, Gecko) Chrome/120.0.0.0 Safari/537.36")
+			req.Header.Set("Connection", "keep-alive")
+			req.Header.Set("Accept", "*/*")
+
+			if referer != "" {
+				req.Header.Set("Referer", referer)
+				if u, err := url.Parse(referer); err == nil {
+					req.Header.Set("Origin", u.Scheme+"://"+u.Host)
+				}
+			}
+			if cookie != "" {
+				req.Header.Set("Cookie", cookie)
+			}
+
+			res, err := client.Do(req)
 			if err != nil || res.StatusCode != 200 {
 				continue
 			}
-			return res.String()
+			defer res.Body.Close()
+
+			body, err := io.ReadAll(res.Body)
+			if err != nil {
+				continue
+			}
+			return string(body)
 		}
 	}
 	return ""
@@ -424,43 +563,89 @@ func (ds *DownloaderService) getTsList(host, body string) []TsInfo {
 	return tsList
 }
 
-func (ds *DownloaderService) downloadTsFile(ts TsInfo, downloadDir, key string, retries int) bool {
+func (ds *DownloaderService) downloadTsFile(ts TsInfo, downloadDir, key string, retries int, referer string, cookie string) (int64, bool) {
+	referer = sanitizeHeader(referer)
+	cookie = sanitizeHeader(cookie)
 	currPathFile := filepath.Join(downloadDir, ts.Name)
 	if exists, _ := pathExists(currPathFile); exists {
-		return true
+		if stat, err := os.Stat(currPathFile); err == nil {
+			return stat.Size(), true
+		}
+		return 0, true
+	}
+
+	// 预先准备好 Origin
+	var origin string
+	if referer != "" {
+		if u, err := url.Parse(referer); err == nil {
+			origin = u.Scheme + "://" + u.Host
+		}
 	}
 
 	for attempt := 0; attempt < retries; attempt++ {
-		success := func() bool {
-			ro := &grequests.RequestOptions{
-				UserAgent:      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-				RequestTimeout: HEAD_TIMEOUT,
+		success, size := func() (bool, int64) {
+			client := &http.Client{
+				Timeout: HEAD_TIMEOUT,
+				CheckRedirect: func(req *http.Request, via []*http.Request) error {
+					if len(via) >= 10 {
+						return fmt.Errorf("too many redirects")
+					}
+					if referer != "" {
+						req.Header.Set("Referer", referer)
+						if origin != "" {
+							req.Header.Set("Origin", origin)
+						}
+					}
+					if cookie != "" {
+						req.Header.Set("Cookie", cookie)
+					}
+					req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+					return nil
+				},
 			}
 
-			res, err := grequests.Get(ts.Url, ro)
-			if err != nil || !res.Ok {
-				return false
+			req, err := http.NewRequest("GET", ts.Url, nil)
+			if err != nil {
+				return false, 0
 			}
 
-			origData := res.Bytes()
-			if len(origData) == 0 {
-				return false
-			}
+			req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+			req.Header.Set("Connection", "keep-alive")
+			req.Header.Set("Accept", "*/*")
+			req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
 
-			// 验证 Content-Length 确保下载完整
-			contentLenStr := res.Header.Get("Content-Length")
-			if contentLenStr != "" {
-				expectedLen, _ := strconv.Atoi(contentLenStr)
-				if expectedLen > 0 && len(origData) != expectedLen {
-					return false
+			if referer != "" {
+				req.Header.Set("Referer", referer)
+				if origin != "" {
+					req.Header.Set("Origin", origin)
 				}
+			}
+			if cookie != "" {
+				req.Header.Set("Cookie", cookie)
+			}
+
+			res, err := client.Do(req)
+			if err != nil || res.StatusCode != http.StatusOK {
+				return false, 0
+			}
+			defer res.Body.Close()
+
+			origData, err := io.ReadAll(res.Body)
+			if err != nil || len(origData) == 0 {
+				return false, 0
+			}
+
+			// 验证 Content-Length
+			contentLen := res.ContentLength
+			if contentLen > 0 && int64(len(origData)) != contentLen {
+				return false, 0
 			}
 
 			// 如果有加密，先解密
 			if key != "" {
 				origData, err = ds.AesDecrypt(origData, []byte(key))
 				if err != nil {
-					return false
+					return false, 0
 				}
 			}
 
@@ -489,21 +674,21 @@ func (ds *DownloaderService) downloadTsFile(ts TsInfo, downloadDir, key string, 
 			tempPath := currPathFile + ".tmp"
 			err = os.WriteFile(tempPath, origData, 0666)
 			if err != nil {
-				return false
+				return false, 0
 			}
 
 			// 重命名为正式文件
 			err = os.Rename(tempPath, currPathFile)
 			if err != nil {
 				os.Remove(tempPath)
-				return false
+				return false, 0
 			}
 
-			return true
+			return true, int64(len(origData))
 		}()
 
 		if success {
-			return true
+			return size, true
 		}
 		
 		// 失败重试前稍微等待一下，避免瞬时网络问题
@@ -512,14 +697,19 @@ func (ds *DownloaderService) downloadTsFile(ts TsInfo, downloadDir, key string, 
 		}
 	}
 
-	return false
+	return 0, false
 }
 
-func (ds *DownloaderService) downloader(taskID string, maxGoroutines int, key string, cacheDir string, tsList []TsInfo, ctrl *taskControl) bool {
+func (ds *DownloaderService) downloader(taskID string, maxGoroutines int, key string, cacheDir string, tsList []TsInfo, ctrl *taskControl, referer string, cookie string) bool {
 	retry := 3
 	limiter := make(chan struct{}, maxGoroutines)
 	tsLen := len(tsList)
 	var countMu sync.Mutex
+
+	// 速度统计
+	var totalBytes int64
+	startTime := time.Now()
+	lastUpdateTime := time.Now()
 
 	getMissing := func() []TsInfo {
 		var missing []TsInfo
@@ -571,16 +761,34 @@ func (ds *DownloaderService) downloader(taskID string, maxGoroutines int, key st
 					<-limiter
 				}()
 
-				success := ds.downloadTsFile(ts, cacheDir, key, retry)
+				size, success := ds.downloadTsFile(ts, cacheDir, key, retry, referer, cookie)
 
 				if success {
 					countMu.Lock()
 					downloadCount++
-					progress := float64(downloadCount) / float64(tsLen) * 100
-					if progress > 100 {
-						progress = 100
+					totalBytes += size
+
+					now := time.Now()
+					// 每 500ms 更新一次进度和速度
+					if now.Sub(lastUpdateTime) >= 500*time.Millisecond || downloadCount == tsLen {
+						duration := now.Sub(startTime).Seconds()
+						speedStr := "0 KB/s"
+						if duration > 0 {
+							speed := float64(totalBytes) / duration
+							if speed > 1024*1024 {
+								speedStr = fmt.Sprintf("%.2f MB/s", speed/1024/1024)
+							} else {
+								speedStr = fmt.Sprintf("%.2f KB/s", speed/1024)
+							}
+						}
+
+						progress := float64(downloadCount) / float64(tsLen) * 100
+						if progress > 100 {
+							progress = 100
+						}
+						ds.sendProgress(taskID, progress, speedStr, downloadCount, tsLen)
+						lastUpdateTime = now
 					}
-					ds.sendProgress(taskID, progress, "N/A", downloadCount, tsLen)
 					countMu.Unlock()
 				}
 			}(ts)
@@ -705,7 +913,10 @@ func (ds *DownloaderService) mergeTs(taskID string, cacheDir, downloadDir, outpu
 		if ctrl != nil {
 			select {
 			case <-ctrl.stopped:
-				log.Printf("[Info] 任务 %s 在合并阶段停止\n", taskID)
+				muxer.WriteTrailer()
+				outMv.Close()
+				os.Remove(mvName) // 清理不完整的合并文件
+				ds.sendLog(taskID, "warn", "用户终止了合并过程，已清理临时文件")
 				return ""
 			default:
 			}
@@ -725,6 +936,26 @@ func (ds *DownloaderService) mergeTs(taskID string, cacheDir, downloadDir, outpu
 
 	muxer.WriteTrailer()
 	return mvName
+}
+
+// 辅助方法：过滤文件名非法字符
+func sanitizeFileName(name string) string {
+	if name == "" {
+		return "movie"
+	}
+	// 移除可能导致路径穿越或系统问题的字符
+	badChars := []string{"/", "\\", ":", "*", "?", "\"", "<", ">", "|"}
+	for _, char := range badChars {
+		name = strings.ReplaceAll(name, char, "")
+	}
+	return name
+}
+
+// 辅助方法：过滤 Header 非法字符（防御 CRLF 注入）
+func sanitizeHeader(val string) string {
+	val = strings.ReplaceAll(val, "\r", "")
+	val = strings.ReplaceAll(val, "\n", "")
+	return strings.TrimSpace(val)
 }
 
 func (ds *DownloaderService) AesDecrypt(crypted, key []byte) ([]byte, error) {
@@ -796,6 +1027,7 @@ func (ds *DownloaderService) RetryDownload(taskID string) error {
 		OutputName:        task.Name,
 		HostType:          task.HostType,
 		Cookie:            task.Cookie,
+		Referer:           task.Referer,
 		AutoClear:         task.AutoClear,
 		SavePath:          task.SavePath,
 		EnableWebDAV:      task.EnableWebDAV,
@@ -871,14 +1103,14 @@ func (ds *DownloaderService) UploadTaskToWebDAV(taskID string, config *WebDAVCon
 
 		ctrl := ds.createControl(taskID)
 		webdavService := NewWebDAVService(finalConfig)
-		err := webdavService.UploadFile(task.OutputPath, task.Name+".mp4", ctrl.stopped, func(downloaded, total int64) {
+		err := webdavService.UploadFile(task.OutputPath, task.Name+".mp4", ctrl.stopped, func(downloaded, total int64, speed string) {
 			progress := 0.0
 			if total > 0 {
 				progress = float64(downloaded) / float64(total) * 100
 			}
 			curKB := int(downloaded / 1024)
 			totalKB := int(total / 1024)
-			ds.sendProgress(taskID, progress, "手动上传中", curKB, totalKB)
+			ds.sendProgress(taskID, progress, speed, curKB, totalKB)
 		})
 		
 		ds.removeControl(taskID)
@@ -935,22 +1167,207 @@ func (ds *DownloaderService) StopDownload(taskID string) {
 	}
 }
 
-func (ds *DownloaderService) AnalyzeM3U8(urlStr string) (map[string]interface{}, error) {
-	m3u8Body := ds.getM3u8Body(urlStr)
-	if m3u8Body == "" {
-		return nil, fmt.Errorf("无法获取 m3u8 内容")
+func (ds *DownloaderService) AnalyzeURL(urlStr string, referer string, cookie string) (map[string]interface{}, error) {
+	// 1. 基础校验：检查是否是 M3U8
+	isM3U8 := strings.Contains(strings.ToLower(urlStr), ".m3u8")
+	
+	if isM3U8 {
+		m3u8Body := ds.getM3u8Body(urlStr, referer, cookie)
+		if m3u8Body == "" {
+			return nil, fmt.Errorf("无法获取 m3u8 内容，请检查链接有效性或 Referer 设置")
+		}
+
+		host := ds.getHost(urlStr, "v1")
+		tsList := ds.getTsList(host, m3u8Body)
+		key := ds.getM3u8Key(host, m3u8Body, referer, cookie)
+
+		return map[string]interface{}{
+			"type":     "m3u8",
+			"segments": len(tsList),
+			"hasKey":   key != "",
+		}, nil
 	}
 
-	host := ds.getHost(urlStr, "v1")
-	tsList := ds.getTsList(host, m3u8Body)
-	key := ds.getM3u8Key(host, m3u8Body)
-
-	info := map[string]interface{}{
-		"segments": len(tsList),
-		"hasKey":   key != "",
+	// 2. 视频格式校验：检查是否是支持的视频格式
+	if !ds.checkIsVideoURL(urlStr, referer, cookie) {
+		return nil, fmt.Errorf("不支持的下载类型：仅支持 M3U8 及主流视频格式 (MP4, MKV, AVI 等)")
 	}
 
-	return info, nil
+	// 否则视为支持的通用视频文件
+	return map[string]interface{}{
+		"type": "file",
+	}, nil
+}
+
+// 辅助方法：检查链接是否为视频类资源
+func (ds *DownloaderService) checkIsVideoURL(urlStr, referer, cookie string) bool {
+	lowerURL := strings.ToLower(urlStr)
+	videoExts := []string{".mp4", ".mkv", ".avi", ".flv", ".mov", ".wmv", ".webm", ".m4v", ".ts", ".3gp", ".rmvb"}
+	
+	// 优先通过后缀名判断
+	for _, ext := range videoExts {
+		if strings.Contains(lowerURL, ext) {
+			return true
+		}
+	}
+
+	// 如果后缀不明显，尝试发送 HEAD 请求检查 Content-Type
+	client := &http.Client{Timeout: 5 * time.Second}
+	req, err := http.NewRequest("HEAD", urlStr, nil)
+	if err != nil {
+		return false
+	}
+
+	if referer != "" {
+		req.Header.Set("Referer", referer)
+	}
+	if cookie != "" {
+		req.Header.Set("Cookie", cookie)
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+
+	contentType := strings.ToLower(resp.Header.Get("Content-Type"))
+	return strings.HasPrefix(contentType, "video/") || 
+		   strings.Contains(contentType, "application/vnd.apple.mpegurl") || 
+		   strings.Contains(contentType, "application/x-mpegurl")
+}
+
+func (ds *DownloaderService) downloadSingleFile(taskID string, urlStr string, savePath string, referer string, cookie string, ctrl *taskControl) bool {
+	referer = sanitizeHeader(referer)
+	cookie = sanitizeHeader(cookie)
+
+	client := &http.Client{
+		Timeout: 0, // 下载大文件不设置总超时，由 Read 时的 ctx 控制
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return fmt.Errorf("too many redirects")
+			}
+			if referer != "" {
+				req.Header.Set("Referer", referer)
+				if u, err := url.Parse(referer); err == nil {
+					req.Header.Set("Origin", u.Scheme+"://"+u.Host)
+				}
+			}
+			if cookie != "" {
+				req.Header.Set("Cookie", cookie)
+			}
+			req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+			return nil
+		},
+	}
+
+	req, err := http.NewRequest("GET", urlStr, nil)
+	if err != nil {
+		ds.sendLog(taskID, "error", fmt.Sprintf("创建请求失败: %v", err))
+		return false
+	}
+
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+	if referer != "" {
+		req.Header.Set("Referer", referer)
+		if u, err := url.Parse(referer); err == nil {
+			req.Header.Set("Origin", u.Scheme+"://"+u.Host)
+		}
+	}
+	if cookie != "" {
+		req.Header.Set("Cookie", cookie)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		ds.sendLog(taskID, "error", fmt.Sprintf("发起请求失败: %v", err))
+		return false
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		ds.sendLog(taskID, "error", fmt.Sprintf("服务器返回错误状态码: %d", resp.StatusCode))
+		return false
+	}
+
+	totalSize := resp.ContentLength
+	ds.taskManager.mu.Lock()
+	if t, exists := ds.taskManager.tasks[taskID]; exists {
+		t.TotalSegments = int(totalSize / 1024) // 这里借用 TotalSegments 存储总 KB
+	}
+	ds.taskManager.mu.Unlock()
+
+	out, err := os.Create(savePath)
+	if err != nil {
+		ds.sendLog(taskID, "error", fmt.Sprintf("创建本地文件失败: %v", err))
+		return false
+	}
+	defer out.Close()
+
+	buffer := make([]byte, 32*1024)
+	var downloaded int64
+	startTime := time.Now()
+	lastUpdate := time.Now()
+
+	for {
+		select {
+		case <-ctrl.stopped:
+			out.Close()
+			os.Remove(savePath)
+			return false
+		case <-ctrl.paused:
+			select {
+			case <-ctrl.resumed:
+			case <-ctrl.stopped:
+				out.Close()
+				os.Remove(savePath)
+				return false
+			}
+		default:
+		}
+
+		n, err := resp.Body.Read(buffer)
+		if n > 0 {
+			_, werr := out.Write(buffer[:n])
+			if werr != nil {
+				ds.sendLog(taskID, "error", fmt.Sprintf("写入文件失败: %v", werr))
+				return false
+			}
+			downloaded += int64(n)
+
+			now := time.Now()
+			if now.Sub(lastUpdate) >= 500*time.Millisecond || downloaded == totalSize {
+				duration := now.Sub(startTime).Seconds()
+				speedStr := "0 KB/s"
+				if duration > 0 {
+					speed := float64(downloaded) / duration
+					if speed > 1024*1024 {
+						speedStr = fmt.Sprintf("%.2f MB/s", speed/1024/1024)
+					} else {
+						speedStr = fmt.Sprintf("%.2f KB/s", speed/1024)
+					}
+				}
+
+				progress := 0.0
+				if totalSize > 0 {
+					progress = float64(downloaded) / float64(totalSize) * 100
+				}
+				ds.sendProgress(taskID, progress, speedStr, int(downloaded/1024), int(totalSize/1024))
+				lastUpdate = now
+			}
+		}
+
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			ds.sendLog(taskID, "error", fmt.Sprintf("读取网络数据失败: %v", err))
+			return false
+		}
+	}
+
+	return true
 }
 
 func (ds *DownloaderService) sendProgress(taskID string, progress float64, speed string, downloaded, total int) {

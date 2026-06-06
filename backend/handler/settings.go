@@ -13,12 +13,14 @@ import (
 )
 
 type SettingsHandler struct {
-	storage *storage.SQLiteStorage
+	storage          *storage.SQLiteStorage
+	schedulerService *service.SchedulerService
 }
 
-func NewSettingsHandler(storage *storage.SQLiteStorage) *SettingsHandler {
+func NewSettingsHandler(storage *storage.SQLiteStorage, scheduler *service.SchedulerService) *SettingsHandler {
 	return &SettingsHandler{
-		storage: storage,
+		storage:          storage,
+		schedulerService: scheduler,
 	}
 }
 
@@ -163,6 +165,22 @@ func (h *SettingsHandler) SaveSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.sendSuccess(w, newSettings)
+}
+
+func (h *SettingsHandler) GetCleanupConfig(w http.ResponseWriter, r *http.Request) {
+	config := h.schedulerService.GetConfig()
+	h.sendSuccess(w, config)
+}
+
+func (h *SettingsHandler) UpdateCleanupConfig(w http.ResponseWriter, r *http.Request) {
+	var config service.CleanupConfig
+	if err := json.NewDecoder(r.Body).Decode(&config); err != nil {
+		h.sendError(w, http.StatusBadRequest, "无效的请求体")
+		return
+	}
+
+	h.schedulerService.UpdateConfig(config)
+	h.sendSuccess(w, config)
 }
 
 func (h *SettingsHandler) sendSuccess(w http.ResponseWriter, data interface{}) {

@@ -138,7 +138,9 @@ func (h *DownloadHandler) UploadToWebDAV(w http.ResponseWriter, r *http.Request)
 
 func (h *DownloadHandler) AnalyzeM3U8(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		URL string `json:"url"`
+		URL     string `json:"url"`
+		Referer string `json:"referer"`
+		Cookie  string `json:"cookie"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -151,7 +153,7 @@ func (h *DownloadHandler) AnalyzeM3U8(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	info, err := h.downloaderService.AnalyzeM3U8(req.URL)
+	info, err := h.downloaderService.AnalyzeURL(req.URL, req.Referer, req.Cookie)
 	if err != nil {
 		h.sendError(w, http.StatusInternalServerError, err.Error())
 		return

@@ -29,9 +29,10 @@ type ProgressReader struct {
 	file       *os.File
 	Total      int64
 	Downloaded int64
-	OnProgress func(downloaded, total int64)
+	OnProgress func(downloaded, total int64, speed string)
 	Stop       <-chan struct{}
 	lastUpdate time.Time
+	startTime  time.Time
 }
 
 func (pr *ProgressReader) Read(p []byte) (int, error) {
@@ -44,16 +45,31 @@ func (pr *ProgressReader) Read(p []byte) (int, error) {
 		}
 	}
 
+	if pr.startTime.IsZero() {
+		pr.startTime = time.Now()
+	}
+
 	n, err := pr.file.Read(p)
 	if n > 0 {
 		pr.Downloaded += int64(n)
 		if pr.Total > 0 {
 			// 限制更新频率，避免 WebSocket 消息过于频繁
-			if time.Since(pr.lastUpdate) > 100*time.Millisecond || pr.Downloaded == pr.Total {
+			now := time.Now()
+			if now.Sub(pr.lastUpdate) > 200*time.Millisecond || pr.Downloaded == pr.Total {
 				if pr.OnProgress != nil {
-					pr.OnProgress(pr.Downloaded, pr.Total)
+					duration := now.Sub(pr.startTime).Seconds()
+					speedStr := "0 KB/s"
+					if duration > 0 {
+						speed := float64(pr.Downloaded) / duration
+						if speed > 1024*1024 {
+							speedStr = fmt.Sprintf("%.2f MB/s", speed/1024/1024)
+						} else {
+							speedStr = fmt.Sprintf("%.2f KB/s", speed/1024)
+						}
+					}
+					pr.OnProgress(pr.Downloaded, pr.Total, speedStr)
 				}
-				pr.lastUpdate = time.Now()
+				pr.lastUpdate = now
 			}
 		}
 	}
@@ -88,7 +104,7 @@ func NewWebDAVService(config WebDAVConfig) *WebDAVService {
 	}
 }
 
-func (w *WebDAVService) UploadFile(localPath, remoteFileName string, stop <-chan struct{}, onProgress func(downloaded, total int64)) error {
+func (w *WebDAVService) UploadFile(localPath, remoteFileName string, stop <-chan struct{}, onProgress func(downloaded, total int64, speed string)) error {
 	if !w.config.Enabled || w.client == nil {
 		return fmt.Errorf("WebDAV is not enabled")
 	}

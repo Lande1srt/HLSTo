@@ -13,6 +13,7 @@ export interface Task {
   downloadedSegments: number
   outputPath?: string
   error?: string
+  referer?: string
   createdAt: string
   completedAt?: string
   webDAVURL?: string
@@ -116,6 +117,7 @@ export const useDownloadStore = defineStore('download', () => {
     outputName?: string
     hostType?: string
     cookie?: string
+    referer?: string
     autoClear?: boolean
     savePath?: string
     enableWebDAV?: boolean
@@ -261,21 +263,28 @@ export const useDownloadStore = defineStore('download', () => {
     }
   }
 
-  const analyzeM3U8 = async (url: string) => {
+  const analyzeM3U8 = async (url: string, referer?: string, cookie?: string) => {
     try {
-      addLog('info', `检测到 M3U8 链接，正在分析: ${url}`)
-      const response = await downloadAPI.analyze(url)
+      addLog('info', `正在分析链接: ${url}`)
+      const response = await downloadAPI.analyze(url, referer, cookie)
       const data = response.data
       if (data.code === 200) {
         const info = data.data
-        addLog('info', `分析完成: 发现 ${info.segments} 个片段${info.hasKey ? ' (加密视频)' : ' (未加密)'}`)
+        if (info.type === 'm3u8') {
+          addLog('info', `分析完成: 发现 ${info.segments} 个片段${info.hasKey ? ' (加密视频)' : ' (未加密)'}`)
+        } else {
+          addLog('info', '分析完成: 检测为通用视频文件直链')
+        }
+        return true
       } else {
-        addLog('warn', `分析失败: ${data.message}`)
+        addLog('error', `分析失败: ${data.message}`)
+        return false
       }
     } catch (error: unknown) {
       const err = error as { response?: { data?: { message?: string } }; message?: string }
       const errorMessage = err.response?.data?.message || err.message || '未知错误'
       addLog('error', `分析请求失败: ${errorMessage}`)
+      return false
     }
   }
 

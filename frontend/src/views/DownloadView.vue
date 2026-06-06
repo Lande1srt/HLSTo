@@ -12,6 +12,7 @@ const threadCount = ref(24)
 const outputName = ref('movie')
 const hostType = ref('v1')
 const cookie = ref('')
+const referer = ref('')
 const autoClear = ref(true)
 const savePath = ref('')
 
@@ -20,6 +21,8 @@ const webDAVRemoteDir = ref('')
 const deleteAfterUpload = ref(false)
 
 const showBrowser = ref(false)
+const showMoreParams = ref(false)
+const analyzing = ref(false)
 
 const onDirSelect = (path: string) => {
   webDAVRemoteDir.value = path
@@ -34,7 +37,24 @@ const handleUrlChange = async () => {
   const m3u8Regex = /\.m3u8/i
   if (m3u8Regex.test(currentUrl) && currentUrl !== lastAnalyzedUrl) {
     lastAnalyzedUrl = currentUrl
-    await downloadStore.analyzeM3U8(currentUrl)
+    analyzing.value = true
+    try {
+      await downloadStore.analyzeM3U8(currentUrl, referer.value, cookie.value)
+    } finally {
+      analyzing.value = false
+    }
+  }
+}
+
+const manualAnalyze = async () => {
+  const currentUrl = url.value.trim()
+  if (!currentUrl) return
+  
+  analyzing.value = true
+  try {
+    await downloadStore.analyzeM3U8(currentUrl, referer.value, cookie.value)
+  } finally {
+    analyzing.value = false
   }
 }
 
@@ -45,6 +65,7 @@ onMounted(async () => {
   hostType.value = settingsStore.settings.hostType
   autoClear.value = settingsStore.settings.autoClear
   savePath.value = settingsStore.settings.defaultSavePath
+  referer.value = settingsStore.settings.defaultReferer
   
   enableWebDAV.value = settingsStore.settings.enableWebDAV
   webDAVRemoteDir.value = settingsStore.settings.webDAVRemoteDir
@@ -68,11 +89,12 @@ const startDownload = async () => {
 
   try {
     await downloadStore.startDownload({
-      url: url.value,
+      url: url.value.trim(),
       threadCount: threadCount.value,
-      outputName: outputName.value,
+      outputName: outputName.value.trim(),
       hostType: hostType.value,
-      cookie: cookie.value,
+      cookie: cookie.value.trim(),
+      referer: referer.value.trim(),
       autoClear: autoClear.value,
       savePath: savePath.value,
       enableWebDAV: enableWebDAV.value,
@@ -141,12 +163,13 @@ const formatSize = (kb: number) => {
               @input="handleUrlChange"
             />
             <button 
-              @click="downloadStore.analyzeM3U8(url)"
-              :disabled="!url.trim() || downloadStore.isDownloading"
-              class="btn-secondary whitespace-nowrap px-4"
-              title="手动分析链接"
+              @click="manualAnalyze"
+              :disabled="!url.trim() || downloadStore.isDownloading || analyzing"
+              class="btn-secondary whitespace-nowrap px-4 flex items-center gap-2"
+              title="分析 M3U8 链接"
             >
-              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+              <svg v-if="analyzing" class="animate-spin h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+              {{ analyzing ? '分析中...' : '分析' }}
             </button>
           </div>
         </div>
@@ -180,42 +203,73 @@ const formatSize = (kb: number) => {
           </div>
         </div>
 
-        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div>
-            <label class="block text-sm font-medium text-gray-300 mb-2">
-              Host 类型
-            </label>
-            <select v-model="hostType" class="input-field" :disabled="downloadStore.isDownloading">
-              <option value="v1">V1 (完整路径)</option>
-              <option value="v2">V2 (仅域名)</option>
-            </select>
-          </div>
+        <!-- 更多参数折叠块 -->
+        <div class="border border-white/5 rounded-lg overflow-hidden">
+          <button 
+            @click="showMoreParams = !showMoreParams"
+            class="w-full px-4 py-3 flex items-center justify-between bg-dark-300 hover:bg-dark-300/80 transition-colors text-sm font-medium text-gray-300"
+          >
+            <div class="flex items-center gap-2">
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" :class="{'rotate-90': showMoreParams}" class="transition-transform"><path d="m9 18 6-6-6-6"/></svg>
+              更多参数
+            </div>
+            <span class="text-xs text-gray-500 font-normal">Host类型、保存路径、Cookie</span>
+          </button>
+          
+          <div v-show="showMoreParams" class="p-4 space-y-4 bg-dark-300/30 border-t border-white/5">
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <label class="block text-sm font-medium text-gray-300 mb-2">
+                  Host 类型
+                </label>
+                <select v-model="hostType" class="input-field" :disabled="downloadStore.isDownloading">
+                  <option value="v1">V1 (完整路径)</option>
+                  <option value="v2">V2 (仅域名)</option>
+                </select>
+              </div>
 
-          <div>
-            <label class="block text-sm font-medium text-gray-300 mb-2">
-              保存路径
-            </label>
-            <input
-              v-model="savePath"
-              type="text"
-              placeholder="默认当前目录"
-              class="input-field"
-              :disabled="downloadStore.isDownloading"
-            />
-          </div>
-        </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-300 mb-2">
+                  保存路径
+                </label>
+                <input
+                  v-model="savePath"
+                  type="text"
+                  placeholder="默认当前目录"
+                  class="input-field"
+                  :disabled="downloadStore.isDownloading"
+                />
+              </div>
+            </div>
 
-        <div>
-          <label class="block text-sm font-medium text-gray-300 mb-2">
-            Cookie (可选)
-          </label>
-          <input
-            v-model="cookie"
-            type="text"
-            placeholder="key1=value1; key2=value2"
-            class="input-field"
-            :disabled="downloadStore.isDownloading"
-          />
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <label class="block text-sm font-medium text-gray-300 mb-2">
+                  自定义主机名 (Referer)
+                </label>
+                <input
+                  v-model="referer"
+                  type="text"
+                  placeholder="https://example.com/ (用于绕过鉴权)"
+                  class="input-field"
+                  :disabled="downloadStore.isDownloading"
+                />
+              </div>
+
+              <div>
+                <label class="block text-sm font-medium text-gray-300 mb-2">
+                  Cookie (可选)
+                </label>
+                <input
+                  v-model="cookie"
+                  type="text"
+                  placeholder="key1=value1; key2=value2"
+                  class="input-field"
+                  :disabled="downloadStore.isDownloading"
+                />
+              </div>
+            </div>
+          </div>
         </div>
 
         <div class="flex items-center space-x-2">
@@ -423,8 +477,18 @@ const formatSize = (kb: number) => {
           </div>
         </div>
 
-        <div v-if="downloadStore.currentTask.error" class="mt-4 p-3 bg-red-400/10 rounded-lg border border-red-400/30">
+        <div v-if="downloadStore.currentTask.status === 'failed' && downloadStore.currentTask.error" class="mt-4 p-3 bg-red-400/10 rounded-lg border border-red-400/30">
           <div class="text-sm text-red-400 font-medium mb-1">下载失败</div>
+          <div class="text-xs text-gray-400">
+            {{ downloadStore.currentTask.error }}
+          </div>
+        </div>
+
+        <!-- 针对 merging 或 uploading 状态显示实时详细信息 -->
+        <div v-if="(downloadStore.currentTask.status === 'merging' || downloadStore.currentTask.status === 'uploading') && downloadStore.currentTask.error" class="mt-4 p-3 bg-primary/10 rounded-lg border border-primary/30">
+          <div class="text-sm text-primary font-medium mb-1">
+            {{ downloadStore.currentTask.status === 'merging' ? '正在合并' : '正在上传' }}
+          </div>
           <div class="text-xs text-gray-400">
             {{ downloadStore.currentTask.error }}
           </div>

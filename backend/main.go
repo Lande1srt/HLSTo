@@ -56,10 +56,12 @@ func main() {
 	taskManager := service.NewTaskManager(dbStorage)
 	wsManager := websocket.NewWebSocketManager()
 	downloaderService := service.NewDownloaderService(taskManager, wsManager)
+	schedulerService := service.NewSchedulerService(dbStorage)
+	schedulerService.Start()
 
 	taskHandler := handler.NewTaskHandler(taskManager, downloaderService)
 	downloadHandler := handler.NewDownloadHandler(downloaderService, taskManager)
-	settingsHandler := handler.NewSettingsHandler(dbStorage)
+	settingsHandler := handler.NewSettingsHandler(dbStorage, schedulerService)
 	authHandler := handler.NewAuthHandler()
 	wsHandler := websocket.NewWebSocketHandler(wsManager)
 
@@ -89,6 +91,8 @@ func main() {
 	protectedAPI.HandleFunc("/settings/webdav/test", settingsHandler.TestWebDAV).Methods("POST")
 	protectedAPI.HandleFunc("/settings/webdav/list", settingsHandler.ListWebDAVDir).Methods("POST")
 	protectedAPI.HandleFunc("/settings/clear-cache", settingsHandler.ClearCache).Methods("POST")
+	protectedAPI.HandleFunc("/settings/cleanup-config", settingsHandler.GetCleanupConfig).Methods("GET")
+	protectedAPI.HandleFunc("/settings/cleanup-config", settingsHandler.UpdateCleanupConfig).Methods("POST")
 
 	router.HandleFunc("/ws", wsHandler.HandleWebSocket)
 

@@ -65,6 +65,7 @@ func createTables(db *sql.DB) error {
 		thread_count INTEGER DEFAULT 10,
 		host_type TEXT DEFAULT 'v1',
 		cookie TEXT,
+		referer TEXT,
 		auto_clear BOOLEAN DEFAULT 1,
 		save_path TEXT,
 		output_path TEXT,
@@ -120,7 +121,8 @@ func createTables(db *sql.DB) error {
 		webdav_password TEXT DEFAULT '',
 		webdav_remote_dir TEXT DEFAULT '',
 		delete_after_upload BOOLEAN DEFAULT 0,
-		task_sort_order TEXT DEFAULT 'desc'
+		task_sort_order TEXT DEFAULT 'desc',
+		default_referer TEXT DEFAULT ''
 	);
 	`
 
@@ -141,6 +143,12 @@ func createTables(db *sql.DB) error {
 
 func migrateTasksTable(db *sql.DB) {
 	columns := map[string]string{
+		"thread_count":        "INTEGER DEFAULT 24",
+		"host_type":           "TEXT DEFAULT 'v1'",
+		"cookie":              "TEXT DEFAULT ''",
+		"referer":             "TEXT DEFAULT ''",
+		"auto_clear":          "BOOLEAN DEFAULT 1",
+		"save_path":           "TEXT DEFAULT ''",
 		"enable_webdav":       "BOOLEAN DEFAULT 0",
 		"webdav_url":          "TEXT DEFAULT ''",
 		"webdav_username":     "TEXT DEFAULT ''",
@@ -163,6 +171,7 @@ func migrateTasksTable(db *sql.DB) {
 func migrateSettingsTable(db *sql.DB) {
 	columns := map[string]string{
 		"task_sort_order": "TEXT DEFAULT 'desc'",
+		"default_referer": "TEXT DEFAULT ''",
 	}
 
 	for col, colType := range columns {
@@ -181,7 +190,7 @@ func (s *SQLiteStorage) GetSettings() (*model.Settings, error) {
 		default_thread_count, default_output_name, default_save_path,
 		auto_clear, host_type, enable_webdav, webdav_url,
 		webdav_username, webdav_password, webdav_remote_dir,
-		delete_after_upload, task_sort_order
+		delete_after_upload, task_sort_order, default_referer
 	FROM settings WHERE id = 1
 	`
 
@@ -199,6 +208,7 @@ func (s *SQLiteStorage) GetSettings() (*model.Settings, error) {
 		&settings.WebDAVRemoteDir,
 		&settings.DeleteAfterUpload,
 		&settings.TaskSortOrder,
+		&settings.DefaultReferer,
 	)
 
 	if err == sql.ErrNoRows {
@@ -222,7 +232,8 @@ func (s *SQLiteStorage) SaveSettings(settings *model.Settings) error {
 		webdav_password = ?,
 		webdav_remote_dir = ?,
 		delete_after_upload = ?,
-		task_sort_order = ?
+		task_sort_order = ?,
+		default_referer = ?
 	WHERE id = 1
 	`
 
@@ -240,6 +251,7 @@ func (s *SQLiteStorage) SaveSettings(settings *model.Settings) error {
 		settings.WebDAVRemoteDir,
 		settings.DeleteAfterUpload,
 		settings.TaskSortOrder,
+		settings.DefaultReferer,
 	)
 
 	return err
@@ -249,11 +261,11 @@ func (s *SQLiteStorage) AddTask(task *model.Task) error {
 	query := `
 	INSERT INTO tasks (
 		id, url, name, status, progress, speed, 
-		thread_count, host_type, cookie, auto_clear, save_path,
+		thread_count, host_type, cookie, referer, auto_clear, save_path,
 		enable_webdav, webdav_url, webdav_username, webdav_password,
 		webdav_remote_dir, delete_after_upload,
 		total_segments, downloaded_segments, created_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 
 	_, err := s.db.Exec(
@@ -267,6 +279,7 @@ func (s *SQLiteStorage) AddTask(task *model.Task) error {
 		task.ThreadCount,
 		task.HostType,
 		task.Cookie,
+		task.Referer,
 		task.AutoClear,
 		task.SavePath,
 		task.EnableWebDAV,
@@ -332,7 +345,7 @@ func (s *SQLiteStorage) GetTask(taskID string) (*model.Task, error) {
 	query := `
 	SELECT 
 		id, url, name, status, progress, speed,
-		thread_count, host_type, cookie, auto_clear, save_path,
+		thread_count, host_type, cookie, referer, auto_clear, save_path,
 		output_path, enable_webdav, webdav_url, webdav_username,
 		webdav_password, webdav_remote_dir, delete_after_upload,
 		total_segments, downloaded_segments,
@@ -355,6 +368,7 @@ func (s *SQLiteStorage) GetTask(taskID string) (*model.Task, error) {
 		&task.ThreadCount,
 		&task.HostType,
 		&task.Cookie,
+		&task.Referer,
 		&task.AutoClear,
 		&task.SavePath,
 		&task.OutputPath,
@@ -392,7 +406,7 @@ func (s *SQLiteStorage) GetAllTasks() ([]*model.Task, error) {
 	query := `
 	SELECT 
 		id, url, name, status, progress, speed,
-		thread_count, host_type, cookie, auto_clear, save_path,
+		thread_count, host_type, cookie, referer, auto_clear, save_path,
 		output_path, enable_webdav, webdav_url, webdav_username,
 		webdav_password, webdav_remote_dir, delete_after_upload,
 		total_segments, downloaded_segments,
@@ -422,6 +436,7 @@ func (s *SQLiteStorage) GetAllTasks() ([]*model.Task, error) {
 			&task.ThreadCount,
 			&task.HostType,
 			&task.Cookie,
+			&task.Referer,
 			&task.AutoClear,
 			&task.SavePath,
 			&task.OutputPath,
