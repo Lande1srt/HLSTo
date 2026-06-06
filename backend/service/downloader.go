@@ -1302,24 +1302,24 @@ func (ds *DownloaderService) downloadSingleFile(taskID string, urlStr string, sa
 	var err error
 
 	for attempt := 0; attempt < maxRetries; attempt++ {
-		req, err = http.NewRequest("GET", urlStr, nil)
+		httpRequest, err := http.NewRequest("GET", urlStr, nil)
 		if err != nil {
 			ds.sendLog(taskID, "error", fmt.Sprintf("创建请求失败: %v", err))
 			return false
 		}
 
-		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+		httpRequest.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 		if referer != "" {
-			req.Header.Set("Referer", referer)
+			httpRequest.Header.Set("Referer", referer)
 			if u, err := url.Parse(referer); err == nil {
-				req.Header.Set("Origin", u.Scheme+"://"+u.Host)
+				httpRequest.Header.Set("Origin", u.Scheme+"://"+u.Host)
 			}
 		}
 		if cookie != "" {
-			req.Header.Set("Cookie", cookie)
+			httpRequest.Header.Set("Cookie", cookie)
 		}
 
-		resp, err = client.Do(req)
+		resp, err = client.Do(httpRequest)
 		if err == nil && resp.StatusCode == http.StatusOK {
 			break
 		}
