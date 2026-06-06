@@ -10,12 +10,14 @@ import (
 )
 
 type TaskHandler struct {
-	taskManager *service.TaskManager
+	taskManager       *service.TaskManager
+	downloaderService *service.DownloaderService
 }
 
-func NewTaskHandler(taskManager *service.TaskManager) *TaskHandler {
+func NewTaskHandler(taskManager *service.TaskManager, downloaderService *service.DownloaderService) *TaskHandler {
 	return &TaskHandler{
-		taskManager: taskManager,
+		taskManager:       taskManager,
+		downloaderService: downloaderService,
 	}
 }
 
@@ -41,6 +43,9 @@ func (h *TaskHandler) DeleteTask(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	id := vars["id"]
 
+	// 在删除前先停止任务（如果正在运行）
+	h.downloaderService.StopDownload(id)
+	
 	h.taskManager.DeleteTask(id)
 	h.sendSuccess(w, map[string]string{"message": "删除成功"})
 }

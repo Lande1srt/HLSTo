@@ -6,7 +6,7 @@ export interface Task {
   id: string
   url: string
   name: string
-  status: 'pending' | 'downloading' | 'paused' | 'uploading' | 'completed' | 'failed'
+  status: 'pending' | 'downloading' | 'merging' | 'uploading' | 'completed' | 'failed' | 'paused'
   progress: number
   speed: string
   totalSegments: number
@@ -82,6 +82,9 @@ export const useDownloadStore = defineStore('download', () => {
               currentTask.value.status = data.status
               if (data.message) {
                 addLog('info', data.message)
+                currentTask.value.error = data.message // 实时更新消息内容
+              } else {
+                currentTask.value.error = '' // 如果没有消息，清空之前的错误
               }
               if (data.status === 'completed' || data.status === 'failed') {
                 isDownloading.value = false
@@ -188,12 +191,32 @@ export const useDownloadStore = defineStore('download', () => {
         addLog('info', '重试成功，开始下载')
         // 如果是当前正在查看的任务，需要重新连接 WS
         if (currentTask.value?.id === taskId) {
+          isDownloading.value = true
           connectWebSocket(taskId)
         }
       }
     } catch (error: unknown) {
       const err = error as { response?: { data?: { message?: string } }; message?: string }
       const errorMessage = err.response?.data?.message || err.message || '重试失败'
+      addLog('error', errorMessage)
+    }
+  }
+
+  const retryUpload = async (taskId: string) => {
+    try {
+      addLog('info', '正在重新尝试 WebDAV 上传...')
+      const response = await downloadAPI.upload(taskId)
+      if (response.data.code === 200) {
+        addLog('info', '上传任务已重新提交')
+        if (currentTask.value?.id === taskId) {
+          currentTask.value.status = 'uploading'
+          isDownloading.value = true
+          connectWebSocket(taskId)
+        }
+      }
+    } catch (error: unknown) {
+      const err = error as { response?: { data?: { message?: string } }; message?: string }
+      const errorMessage = err.response?.data?.message || err.message || '重试上传失败'
       addLog('error', errorMessage)
     }
   }
@@ -214,15 +237,23 @@ export const useDownloadStore = defineStore('download', () => {
 
   const stopDownload = async () => {
     if (!currentTask.value) return
+    await stopDownloadById(currentTask.value.id)
+  }
+
+  const stopDownloadById = async (taskId: string) => {
     try {
-      await downloadAPI.stop(currentTask.value.id)
-      if (ws.value) {
-        ws.value.close()
-        ws.value = null
+      await downloadAPI.stop(taskId)
+      
+      // 如果是当前正在查看的任务
+      if (currentTask.value?.id === taskId) {
+        if (ws.value) {
+          ws.value.close()
+          ws.value = null
+        }
+        currentTask.value.status = 'failed'
+        isDownloading.value = false
       }
-      currentTask.value.status = 'failed'
-      isDownloading.value = false
-      addLog('info', '下载已停止')
+      addLog('info', `任务 ${taskId} 已停止`)
     } catch (error: unknown) {
       const err = error as { response?: { data?: { message?: string } }; message?: string }
       const errorMessage = err.response?.data?.message || err.message || '停止失败'
@@ -266,7 +297,9 @@ export const useDownloadStore = defineStore('download', () => {
     pauseDownload,
     resumeDownload,
     retryDownload,
+    retryUpload,
     stopDownload,
+    stopDownloadById,
     reset,
     analyzeM3U8,
     uploadTask

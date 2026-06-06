@@ -45,3 +45,4 @@ go.work.sum
 
 # Backend binary
 *.exe
+*.zip

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path"
 	"strings"
+	"time"
 
 	"github.com/studio-b12/gowebdav"
 )
@@ -24,20 +25,50 @@ type WebDAVService struct {
 	config WebDAVConfig
 }
 
-type ProgressWriter struct {
+type ProgressReader struct {
+	file       *os.File
 	Total      int64
 	Downloaded int64
-	OnProgress func(progress float64)
+	OnProgress func(downloaded, total int64)
+	Stop       <-chan struct{}
+	lastUpdate time.Time
 }
 
-func (pw *ProgressWriter) Write(p []byte) (int, error) {
-	n := len(p)
-	pw.Downloaded += int64(n)
-	if pw.Total > 0 {
-		progress := float64(pw.Downloaded) / float64(pw.Total) * 100
-		pw.OnProgress(progress)
+func (pr *ProgressReader) Read(p []byte) (int, error) {
+	// 检查是否已取消
+	if pr.Stop != nil {
+		select {
+		case <-pr.Stop:
+			return 0, fmt.Errorf("upload cancelled")
+		default:
+		}
 	}
-	return n, nil
+
+	n, err := pr.file.Read(p)
+	if n > 0 {
+		pr.Downloaded += int64(n)
+		if pr.Total > 0 {
+			// 限制更新频率，避免 WebSocket 消息过于频繁
+			if time.Since(pr.lastUpdate) > 100*time.Millisecond || pr.Downloaded == pr.Total {
+				if pr.OnProgress != nil {
+					pr.OnProgress(pr.Downloaded, pr.Total)
+				}
+				pr.lastUpdate = time.Now()
+			}
+		}
+	}
+	return n, err
+}
+
+// 实现 Seeker 接口，以便 http.NewRequest 能识别出 Content-Length
+func (pr *ProgressReader) Seek(offset int64, whence int) (int64, error) {
+	n, err := pr.file.Seek(offset, whence)
+	if err == nil && offset == 0 && whence == 0 {
+		// 如果回滚到开头（通常发生在 Digest 认证重试时），重置进度
+		pr.Downloaded = 0
+		log.Printf("[WebDAV] Request seek to 0, resetting progress counter")
+	}
+	return n, err
 }
 
 func NewWebDAVService(config WebDAVConfig) *WebDAVService {
@@ -57,7 +88,7 @@ func NewWebDAVService(config WebDAVConfig) *WebDAVService {
 	}
 }
 
-func (w *WebDAVService) UploadFile(localPath, remoteFileName string, onProgress func(progress float64)) error {
+func (w *WebDAVService) UploadFile(localPath, remoteFileName string, stop <-chan struct{}, onProgress func(downloaded, total int64)) error {
 	if !w.config.Enabled || w.client == nil {
 		return fmt.Errorf("WebDAV is not enabled")
 	}
@@ -91,17 +122,20 @@ func (w *WebDAVService) UploadFile(localPath, remoteFileName string, onProgress 
 
 	remoteFilePath := path.Join(remoteDir, remoteFileName)
 
-	// 使用 ProgressWriter 包装 file 以监控进度
+	// 使用 ProgressReader 包装 file 以监控进度
+	// 通过实现 Seeker 接口，可以让 http.NewRequest 识别出 Content-Length，从而实现真正的流式上传
 	var reader io.Reader = file
-	if onProgress != nil {
-		pw := &ProgressWriter{
+	if onProgress != nil || stop != nil {
+		reader = &ProgressReader{
+			file:       file,
 			Total:      totalSize,
 			OnProgress: onProgress,
+			Stop:       stop,
+			lastUpdate: time.Now(),
 		}
-		reader = io.TeeReader(file, pw)
 	}
 
-	// 使用流式上传，避免大文件占用内存
+	// 使用流式上传，由于 reader 实现了 Seeker 接口，gowebdav 内部的 http.Client 会正确识别 Content-Length
 	err = w.client.WriteStream(remoteFilePath, reader, 0644)
 	if err != nil {
 		return fmt.Errorf("failed to upload file: %v", err)

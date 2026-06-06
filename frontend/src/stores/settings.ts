@@ -14,6 +14,7 @@ export interface Settings {
   webDAVPassword: string
   webDAVRemoteDir: string
   deleteAfterUpload: boolean
+  taskSortOrder: string
 }
 
 export const useSettingsStore = defineStore('settings', () => {
@@ -28,7 +29,8 @@ export const useSettingsStore = defineStore('settings', () => {
     webDAVUsername: '',
     webDAVPassword: '',
     webDAVRemoteDir: '',
-    deleteAfterUpload: false
+    deleteAfterUpload: false,
+    taskSortOrder: 'desc'
   })
 
   const loadSettings = async () => {

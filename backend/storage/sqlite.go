@@ -104,6 +104,7 @@ func createTables(db *sql.DB) error {
 
 	// 简单的数据库迁移：检查并添加缺失的列
 	migrateTasksTable(db)
+	migrateSettingsTable(db)
 
 	settingsTable := `
 	CREATE TABLE IF NOT EXISTS settings (
@@ -118,7 +119,8 @@ func createTables(db *sql.DB) error {
 		webdav_username TEXT DEFAULT '',
 		webdav_password TEXT DEFAULT '',
 		webdav_remote_dir TEXT DEFAULT '',
-		delete_after_upload BOOLEAN DEFAULT 0
+		delete_after_upload BOOLEAN DEFAULT 0,
+		task_sort_order TEXT DEFAULT 'desc'
 	);
 	`
 
@@ -158,13 +160,28 @@ func migrateTasksTable(db *sql.DB) {
 	}
 }
 
+func migrateSettingsTable(db *sql.DB) {
+	columns := map[string]string{
+		"task_sort_order": "TEXT DEFAULT 'desc'",
+	}
+
+	for col, colType := range columns {
+		query := fmt.Sprintf("ALTER TABLE settings ADD COLUMN %s %s", col, colType)
+		_, err := db.Exec(query)
+		if err != nil {
+			continue
+		}
+		log.Printf("[SQLite] Added column %s to settings table\n", col)
+	}
+}
+
 func (s *SQLiteStorage) GetSettings() (*model.Settings, error) {
 	query := `
 	SELECT 
 		default_thread_count, default_output_name, default_save_path,
 		auto_clear, host_type, enable_webdav, webdav_url,
 		webdav_username, webdav_password, webdav_remote_dir,
-		delete_after_upload
+		delete_after_upload, task_sort_order
 	FROM settings WHERE id = 1
 	`
 
@@ -181,6 +198,7 @@ func (s *SQLiteStorage) GetSettings() (*model.Settings, error) {
 		&settings.WebDAVPassword,
 		&settings.WebDAVRemoteDir,
 		&settings.DeleteAfterUpload,
+		&settings.TaskSortOrder,
 	)
 
 	if err == sql.ErrNoRows {
@@ -203,7 +221,8 @@ func (s *SQLiteStorage) SaveSettings(settings *model.Settings) error {
 		webdav_username = ?,
 		webdav_password = ?,
 		webdav_remote_dir = ?,
-		delete_after_upload = ?
+		delete_after_upload = ?,
+		task_sort_order = ?
 	WHERE id = 1
 	`
 
@@ -220,6 +239,7 @@ func (s *SQLiteStorage) SaveSettings(settings *model.Settings) error {
 		settings.WebDAVPassword,
 		settings.WebDAVRemoteDir,
 		settings.DeleteAfterUpload,
+		settings.TaskSortOrder,
 	)
 
 	return err

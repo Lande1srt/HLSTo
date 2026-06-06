@@ -5,12 +5,13 @@ import "time"
 type TaskStatus string
 
 const (
-	StatusPending    TaskStatus = "pending"
+	StatusPending     TaskStatus = "pending"
 	StatusDownloading TaskStatus = "downloading"
-	StatusPaused     TaskStatus = "paused"
-	StatusUploading  TaskStatus = "uploading"
-	StatusCompleted  TaskStatus = "completed"
-	StatusFailed     TaskStatus = "failed"
+	StatusMerging     TaskStatus = "merging"
+	StatusPaused      TaskStatus = "paused"
+	StatusUploading   TaskStatus = "uploading"
+	StatusCompleted   TaskStatus = "completed"
+	StatusFailed      TaskStatus = "failed"
 )
 
 type Task struct {
@@ -73,6 +74,7 @@ type Settings struct {
 	WebDAVPassword     string `json:"webDAVPassword"`
 	WebDAVRemoteDir    string `json:"webDAVRemoteDir"`
 	DeleteAfterUpload  bool   `json:"deleteAfterUpload"`
+	TaskSortOrder      string `json:"taskSortOrder"` // "desc" or "asc"
 }
 
 type WebSocketMessage struct {
@@ -87,6 +89,7 @@ type WebSocketMessage struct {
 	DownloadedSegments int         `json:"downloadedSegments,omitempty"`
 	TotalSegments      int         `json:"totalSegments,omitempty"`
 	Status             string      `json:"status,omitempty"`
+	OutputPath         string      `json:"outputPath,omitempty"`
 }
 
 type LogEntry struct {

@@ -1,22 +1,26 @@
 package service
 
 import (
+	"sort"
 	"sync"
+	"time"
 
 	"m3u8-downloader-web/model"
 	"m3u8-downloader-web/storage"
 )
 
 type TaskManager struct {
-	tasks   map[string]*model.Task
-	mu      sync.RWMutex
-	storage *storage.SQLiteStorage
+	tasks      map[string]*model.Task
+	lastUpdate map[string]time.Time
+	mu         sync.RWMutex
+	storage    *storage.SQLiteStorage
 }
 
 func NewTaskManager(storage *storage.SQLiteStorage) *TaskManager {
 	tm := &TaskManager{
-		tasks:   make(map[string]*model.Task),
-		storage: storage,
+		tasks:      make(map[string]*model.Task),
+		lastUpdate: make(map[string]time.Time),
+		storage:    storage,
 	}
 
 	tm.loadTasksFromDB()
@@ -82,19 +86,34 @@ func (tm *TaskManager) ListTasks() []*model.Task {
 	for _, task := range tm.tasks {
 		tasks = append(tasks, task)
 	}
+
+	// 默认按创建时间倒序排列（新任务在前），确保“队列顺序”
+	sort.Slice(tasks, func(i, j int) bool {
+		return tasks[i].CreatedAt.After(tasks[j].CreatedAt)
+	})
+
 	return tasks
 }
 
-func (tm *TaskManager) UpdateProgress(id string, progress float64, speed string, downloaded int) {
+func (tm *TaskManager) UpdateProgress(id string, progress float64, speed string, downloaded, total int) {
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 	if task, exists := tm.tasks[id]; exists {
 		task.Progress = progress
 		task.Speed = speed
 		task.DownloadedSegments = downloaded
+		if total > 0 {
+			task.TotalSegments = total
+		}
 
 		if tm.storage != nil {
-			go tm.storage.UpdateTask(task)
+			// 节流：每 2 秒最多更新一次数据库进度，或者是进度达到 100%
+			now := time.Now()
+			last, ok := tm.lastUpdate[id]
+			if !ok || now.Sub(last) >= 2*time.Second || progress >= 100 {
+				tm.lastUpdate[id] = now
+				go tm.storage.UpdateTask(task)
+			}
 		}
 	}
 }

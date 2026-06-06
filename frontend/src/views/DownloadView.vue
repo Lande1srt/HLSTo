@@ -2,6 +2,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { useDownloadStore } from '@/stores/download'
 import { useSettingsStore } from '@/stores/settings'
+import WebDAVBrowser from './WebDAVBrowser.vue'
 
 const downloadStore = useDownloadStore()
 const settingsStore = useSettingsStore()
@@ -15,11 +16,14 @@ const autoClear = ref(true)
 const savePath = ref('')
 
 const enableWebDAV = ref(false)
-const webDAVURL = ref('')
-const webDAVUsername = ref('')
-const webDAVPassword = ref('')
 const webDAVRemoteDir = ref('')
 const deleteAfterUpload = ref(false)
+
+const showBrowser = ref(false)
+
+const onDirSelect = (path: string) => {
+  webDAVRemoteDir.value = path
+}
 
 let lastAnalyzedUrl = ''
 const handleUrlChange = async () => {
@@ -43,9 +47,6 @@ onMounted(async () => {
   savePath.value = settingsStore.settings.defaultSavePath
   
   enableWebDAV.value = settingsStore.settings.enableWebDAV
-  webDAVURL.value = settingsStore.settings.webDAVURL
-  webDAVUsername.value = settingsStore.settings.webDAVUsername
-  webDAVPassword.value = settingsStore.settings.webDAVPassword
   webDAVRemoteDir.value = settingsStore.settings.webDAVRemoteDir
   deleteAfterUpload.value = settingsStore.settings.deleteAfterUpload
 })
@@ -75,9 +76,9 @@ const startDownload = async () => {
       autoClear: autoClear.value,
       savePath: savePath.value,
       enableWebDAV: enableWebDAV.value,
-      webDAVURL: webDAVURL.value,
-      webDAVUsername: webDAVUsername.value,
-      webDAVPassword: webDAVPassword.value,
+      webDAVURL: settingsStore.settings.webDAVURL,
+      webDAVUsername: settingsStore.settings.webDAVUsername,
+      webDAVPassword: settingsStore.settings.webDAVPassword,
       webDAVRemoteDir: webDAVRemoteDir.value,
       deleteAfterUpload: deleteAfterUpload.value
     })
@@ -101,6 +102,22 @@ const stopDownload = () => {
 const reset = () => {
   downloadStore.reset()
   url.value = ''
+  
+  // 重新从设置中拉取默认配置
+  threadCount.value = settingsStore.settings.defaultThreadCount
+  outputName.value = settingsStore.settings.defaultOutputName
+  hostType.value = settingsStore.settings.hostType
+  autoClear.value = settingsStore.settings.autoClear
+  savePath.value = settingsStore.settings.defaultSavePath
+  
+  enableWebDAV.value = settingsStore.settings.enableWebDAV
+  webDAVRemoteDir.value = settingsStore.settings.webDAVRemoteDir
+  deleteAfterUpload.value = settingsStore.settings.deleteAfterUpload
+}
+const formatSize = (kb: number) => {
+  if (kb <= 0) return '0 KB'
+  if (kb < 1024) return `${kb} KB`
+  return `${(kb / 1024).toFixed(1)} MB`
 }
 </script>
 
@@ -231,56 +248,28 @@ const reset = () => {
           <div v-if="enableWebDAV" class="space-y-4 pl-6 border-l-2 border-white/10">
             <div>
               <label class="block text-sm font-medium text-gray-300 mb-2">
-                WebDAV 地址
-              </label>
-              <input
-                v-model="webDAVURL"
-                type="text"
-                placeholder="https://your-webdav-server.com/dav"
-                class="input-field"
-                :disabled="downloadStore.isDownloading"
-              />
-            </div>
-
-            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div>
-                <label class="block text-sm font-medium text-gray-300 mb-2">
-                  用户名
-                </label>
-                <input
-                  v-model="webDAVUsername"
-                  type="text"
-                  placeholder="username"
-                  class="input-field"
-                  :disabled="downloadStore.isDownloading"
-                />
-              </div>
-
-              <div>
-                <label class="block text-sm font-medium text-gray-300 mb-2">
-                  密码
-                </label>
-                <input
-                  v-model="webDAVPassword"
-                  type="password"
-                  placeholder="password"
-                  class="input-field"
-                  :disabled="downloadStore.isDownloading"
-                />
-              </div>
-            </div>
-
-            <div>
-              <label class="block text-sm font-medium text-gray-300 mb-2">
                 远程目录 (可选)
               </label>
-              <input
-                v-model="webDAVRemoteDir"
-                type="text"
-                placeholder="/videos/movies"
-                class="input-field"
-                :disabled="downloadStore.isDownloading"
-              />
+              <div class="flex gap-2">
+                <input
+                  v-model="webDAVRemoteDir"
+                  type="text"
+                  placeholder="/videos/movies"
+                  class="input-field"
+                  :disabled="downloadStore.isDownloading"
+                />
+                <button 
+                  @click="showBrowser = true"
+                  :disabled="downloadStore.isDownloading || !settingsStore.settings.webDAVURL"
+                  class="btn-secondary whitespace-nowrap px-4"
+                  title="浏览远程目录"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>
+                </button>
+              </div>
+              <p class="text-xs text-gray-500 mt-1">
+                此处目录优先级高于全局设置
+              </p>
             </div>
 
             <div class="flex items-center space-x-2">
@@ -337,7 +326,15 @@ const reset = () => {
             @click="downloadStore.retryDownload(downloadStore.currentTask.id)"
             class="btn-primary"
           >
-            重试
+            重试下载
+          </button>
+
+          <button
+            v-if="!downloadStore.isDownloading && downloadStore.currentTask && (downloadStore.currentTask.status === 'failed' || downloadStore.currentTask.status === 'completed') && downloadStore.currentTask.outputPath"
+            @click="downloadStore.retryUpload(downloadStore.currentTask.id)"
+            class="btn-secondary text-blue-400 border-blue-400/30 hover:bg-blue-400/10"
+          >
+            重试上传
           </button>
 
           <button
@@ -358,7 +355,12 @@ const reset = () => {
       <div class="space-y-4">
         <div>
           <div class="flex justify-between text-sm text-gray-400 mb-2">
-            <span>{{ downloadStore.currentTask.name }}.mp4</span>
+            <span v-if="downloadStore.currentTask.status === 'uploading'">
+              {{ formatSize(downloadStore.currentTask.downloadedSegments) }} / {{ formatSize(downloadStore.currentTask.totalSegments) }}
+            </span>
+            <span v-else>
+              {{ downloadStore.currentTask.downloadedSegments }} / {{ downloadStore.currentTask.totalSegments }} 片段
+            </span>
             <span>{{ downloadStore.currentTask.progress.toFixed(1) }}%</span>
           </div>
           <div class="progress-bar">
@@ -373,15 +375,19 @@ const reset = () => {
           <div>
             <span class="text-gray-400">状态</span>
             <div class="font-medium" :class="{
+              'text-yellow-500': downloadStore.currentTask.status === 'pending',
               'text-primary': downloadStore.currentTask.status === 'downloading',
+              'text-purple-400': downloadStore.currentTask.status === 'merging',
               'text-blue-400': downloadStore.currentTask.status === 'uploading',
               'text-yellow-400': downloadStore.currentTask.status === 'paused',
               'text-green-400': downloadStore.currentTask.status === 'completed',
               'text-red-400': downloadStore.currentTask.status === 'failed'
             }">
               {{ 
+                downloadStore.currentTask.status === 'pending' ? '等待队列' :
                 downloadStore.currentTask.status === 'downloading' ? '正在下载' :
-                downloadStore.currentTask.status === 'uploading' ? '正在上传 WebDAV' :
+                downloadStore.currentTask.status === 'merging' ? '正在合并' :
+                downloadStore.currentTask.status === 'uploading' ? '正在上传' :
                 downloadStore.currentTask.status === 'paused' ? '已暂停' :
                 downloadStore.currentTask.status === 'completed' ? '已完成' :
                 downloadStore.currentTask.status === 'failed' ? '失败' : 
@@ -448,6 +454,17 @@ const reset = () => {
         </div>
       </div>
     </div>
+
+    <!-- WebDAV 目录选择模态框 -->
+    <WebDAVBrowser
+      :show="showBrowser"
+      :url="settingsStore.settings.webDAVURL"
+      :username="settingsStore.settings.webDAVUsername"
+      :password="settingsStore.settings.webDAVPassword"
+      :initial-path="webDAVRemoteDir"
+      @close="showBrowser = false"
+      @select="onDirSelect"
+    />
   </div>
 </template>
 

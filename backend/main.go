@@ -57,7 +57,7 @@ func main() {
 	wsManager := websocket.NewWebSocketManager()
 	downloaderService := service.NewDownloaderService(taskManager, wsManager)
 
-	taskHandler := handler.NewTaskHandler(taskManager)
+	taskHandler := handler.NewTaskHandler(taskManager, downloaderService)
 	downloadHandler := handler.NewDownloadHandler(downloaderService, taskManager)
 	settingsHandler := handler.NewSettingsHandler(dbStorage)
 	authHandler := handler.NewAuthHandler()

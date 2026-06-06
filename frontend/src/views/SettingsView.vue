@@ -17,7 +17,8 @@ const settings = ref({
   webDAVUsername: '',
   webDAVPassword: '',
   webDAVRemoteDir: '',
-  deleteAfterUpload: false
+  deleteAfterUpload: false,
+  taskSortOrder: 'desc'
 })
 
 const saving = ref(false)
@@ -125,7 +126,8 @@ const reset = () => {
     webDAVUsername: '',
     webDAVPassword: '',
     webDAVRemoteDir: '',
-    deleteAfterUpload: false
+    deleteAfterUpload: false,
+    taskSortOrder: 'desc'
   }
 }
 </script>

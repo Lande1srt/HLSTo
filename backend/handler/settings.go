@@ -113,24 +113,33 @@ func (h *SettingsHandler) ListWebDAVDir(w http.ResponseWriter, r *http.Request) 
 }
 
 func (h *SettingsHandler) ClearCache(w http.ResponseWriter, r *http.Request) {
+	// 1. 获取当前工作目录
 	pwd, err := os.Getwd()
 	if err != nil {
 		h.sendError(w, http.StatusInternalServerError, "获取工作目录失败")
 		return
 	}
 
-	files, err := os.ReadDir(pwd)
-	if err != nil {
-		h.sendError(w, http.StatusInternalServerError, "读取目录失败")
-		return
+	// 2. 获取设置中的默认保存目录
+	dirsToClear := []string{pwd}
+	settings, err := h.storage.GetSettings()
+	if err == nil && settings.DefaultSavePath != "" && settings.DefaultSavePath != pwd {
+		dirsToClear = append(dirsToClear, settings.DefaultSavePath)
 	}
 
 	count := 0
-	for _, f := range files {
-		if f.IsDir() && strings.HasPrefix(f.Name(), "download_") {
-			err := os.RemoveAll(filepath.Join(pwd, f.Name()))
-			if err == nil {
-				count++
+	for _, dir := range dirsToClear {
+		files, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+
+		for _, f := range files {
+			if f.IsDir() && strings.HasPrefix(f.Name(), "download_") {
+				err := os.RemoveAll(filepath.Join(dir, f.Name()))
+				if err == nil {
+					count++
+				}
 			}
 		}
 	}
