@@ -14,6 +14,25 @@ const hostType = ref('v1')
 const cookie = ref('')
 const referer = ref('')
 const autoClear = ref(true)
+
+const normalizeReferrer = (value: string): string => {
+  value = value.trim()
+  if (!value) return ''
+  
+  if (!value.startsWith('http://') && !value.startsWith('https://')) {
+    value = 'https://' + value
+  }
+  
+  if (!value.endsWith('/')) {
+    value = value + '/'
+  }
+  
+  return value
+}
+
+const handleReferrerBlur = () => {
+  referer.value = normalizeReferrer(referer.value)
+}
 const savePath = ref('')
 
 const enableWebDAV = ref(false)
@@ -253,6 +272,7 @@ const formatSize = (kb: number) => {
                   placeholder="https://example.com/ (用于绕过鉴权)"
                   class="input-field"
                   :disabled="downloadStore.isDownloading"
+                  @blur="handleReferrerBlur"
                 />
               </div>
 

@@ -393,7 +393,7 @@ func (ds *DownloaderService) getHost(Url string, ht string) string {
 }
 
 func (ds *DownloaderService) getM3u8Body(Url string, referer string, cookie string) string {
-	referer = sanitizeHeader(referer)
+	referer = normalizeReferrer(referer)
 	cookie = sanitizeHeader(cookie)
 	
 	// 使用自定义 http.Client 以便在重定向时保留 Referer 和 Cookie
@@ -457,7 +457,7 @@ func (ds *DownloaderService) getM3u8Body(Url string, referer string, cookie stri
 }
 
 func (ds *DownloaderService) getM3u8Key(host, html string, referer string, cookie string) string {
-	referer = sanitizeHeader(referer)
+	referer = normalizeReferrer(referer)
 	cookie = sanitizeHeader(cookie)
 	lines := strings.Split(html, "\n")
 	for _, line := range lines {
@@ -564,7 +564,7 @@ func (ds *DownloaderService) getTsList(host, body string) []TsInfo {
 }
 
 func (ds *DownloaderService) downloadTsFile(ts TsInfo, downloadDir, key string, retries int, referer string, cookie string) (int64, bool) {
-	referer = sanitizeHeader(referer)
+	referer = normalizeReferrer(referer)
 	cookie = sanitizeHeader(cookie)
 	currPathFile := filepath.Join(downloadDir, ts.Name)
 	if exists, _ := pathExists(currPathFile); exists {
@@ -958,6 +958,24 @@ func sanitizeHeader(val string) string {
 	return strings.TrimSpace(val)
 }
 
+// 辅助方法：标准化 Referrer 格式
+func normalizeReferrer(referrer string) string {
+	referrer = sanitizeHeader(referrer)
+	if referrer == "" {
+		return ""
+	}
+	
+	if !strings.HasPrefix(referrer, "http://") && !strings.HasPrefix(referrer, "https://") {
+		referrer = "https://" + referrer
+	}
+	
+	if !strings.HasSuffix(referrer, "/") {
+		referrer = referrer + "/"
+	}
+	
+	return referrer
+}
+
 func (ds *DownloaderService) AesDecrypt(crypted, key []byte) ([]byte, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
@@ -1201,6 +1219,7 @@ func (ds *DownloaderService) AnalyzeURL(urlStr string, referer string, cookie st
 
 // 辅助方法：检查链接是否为视频类资源
 func (ds *DownloaderService) checkIsVideoURL(urlStr, referer, cookie string) bool {
+	referer = normalizeReferrer(referer)
 	lowerURL := strings.ToLower(urlStr)
 	videoExts := []string{".mp4", ".mkv", ".avi", ".flv", ".mov", ".wmv", ".webm", ".m4v", ".ts", ".3gp", ".rmvb"}
 	
@@ -1274,7 +1293,7 @@ func (ds *DownloaderService) checkIsVideoURL(urlStr, referer, cookie string) boo
 }
 
 func (ds *DownloaderService) downloadSingleFile(taskID string, urlStr string, savePath string, referer string, cookie string, ctrl *taskControl) bool {
-	referer = sanitizeHeader(referer)
+	referer = normalizeReferrer(referer)
 	cookie = sanitizeHeader(cookie)
 
 	client := &http.Client{

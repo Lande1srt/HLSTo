@@ -34,6 +34,25 @@ const testSuccess = ref(false)
 
 const showBrowser = ref(false)
 
+const normalizeReferrer = (value: string): string => {
+  value = value.trim()
+  if (!value) return ''
+  
+  if (!value.startsWith('http://') && !value.startsWith('https://')) {
+    value = 'https://' + value
+  }
+  
+  if (!value.endsWith('/')) {
+    value = value + '/'
+  }
+  
+  return value
+}
+
+const handleReferrerBlur = () => {
+  settings.value.defaultReferer = normalizeReferrer(settings.value.defaultReferer)
+}
+
 const cleanupConfig = ref({
   enabled: false,
   interval: 1,
@@ -225,7 +244,7 @@ const reset = () => {
           <label class="block text-sm font-medium text-gray-300 mb-2">
             默认主机名 (Referer)
           </label>
-          <input v-model="settings.defaultReferer" type="text" class="input-field" placeholder="https://example.com/" />
+          <input v-model="settings.defaultReferer" type="text" class="input-field" placeholder="https://example.com/" @blur="handleReferrerBlur" />
           <p class="text-xs text-gray-500 mt-1">
             设置默认的 Referer 以绕过部分服务器的鉴权
           </p>
@@ -427,11 +446,11 @@ const reset = () => {
     <div class="card">
       <h3 class="text-lg font-semibold mb-4">关于</h3>
       <div class="text-sm text-gray-400 space-y-2">
-        <p>HLSTo<strong class="text-white">M3U8 Downloader</strong> Web UI 版本</p>
+        <p>HLSTo - <strong class="text-white">M3U8 Downloader</strong> Web UI 版本</p>
         <p>基于<a href="https://github.com/llychao/m3u8-downloader/" target="_blank" rel="noopener noreferrer" style="color: #007bff;text-decoration: none;">m3u8-downloader</a>
           项目开发的多线程 m3u8 视频下载器服务端</p>
-        <p>本项目github仓库：<a href="https://github.com/Lande1srt/HLSTo" target="_blank" rel="noopener noreferrer" style="color: #007bff;text-decoration: none;">https://github.com/Lande1srt/HLSTo</a></p>
         <p>本项目发布官网：<a href="https://coldsea.vip/" target="_blank" rel="noopener noreferrer" style="color: #007bff;text-decoration: none;">https://coldsea.vip/</a></p>
+        <p>本项目github仓库：<a href="https://github.com/Lande1srt/HLSTo" target="_blank" rel="noopener noreferrer" style="color: #007bff;text-decoration: none;">https://github.com/Lande1srt/HLSTo</a></p>
         <p class="pt-2 border-t border-white/10 mt-4">
           技术栈: Vue 3 + Vite + TailwindCSS + Go
         </p>
