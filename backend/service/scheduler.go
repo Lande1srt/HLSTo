@@ -12,9 +12,11 @@ import (
 )
 
 type CleanupConfig struct {
-	Enabled  bool   `json:"enabled"`
-	Interval int    `json:"interval"` // 间隔数值
-	Unit     string `json:"unit"`     // 间隔单位: "minute", "hour", "day"
+	Enabled  bool      `json:"enabled"`
+	Interval int       `json:"interval"` // 间隔数值
+	Unit     string    `json:"unit"`     // 间隔单位: "minute", "hour", "day"
+	LastRun  time.Time `json:"lastRun"`  // 上次运行时间
+	NextRun  time.Time `json:"nextRun"`  // 下次运行时间
 }
 
 type SchedulerService struct {
@@ -61,27 +63,20 @@ func (s *SchedulerService) saveConfig() {
 
 func (s *SchedulerService) Start() {
 	go func() {
-		log.Printf("[Scheduler] 自动清理计划任务已启动，规则: 每 %d %s 清理一次 (启用: %v)\n", 
+		log.Printf("[Scheduler] 自动清理计划任务已启动，规则: 每 %d %s 清理一次 (启用: %v)\n",
 			s.config.Interval, s.config.Unit, s.config.Enabled)
-		
+
 		for {
-			var duration time.Duration
-			switch s.config.Unit {
-			case "minute":
-				duration = time.Duration(s.config.Interval) * time.Minute
-			case "hour":
-				duration = time.Duration(s.config.Interval) * time.Hour
-			case "day":
-				duration = time.Duration(s.config.Interval) * 24 * time.Hour
-			default:
-				duration = 24 * time.Hour
-			}
+			duration := s.calculateDuration()
+			s.config.NextRun = time.Now().Add(duration)
+			// 不需要立即保存到文件，因为这些是内存中的计时状态
 
 			timer := time.NewTimer(duration)
 			select {
 			case <-timer.C:
 				if s.config.Enabled {
 					s.performCleanup()
+					s.config.LastRun = time.Now()
 				}
 			case <-s.stopChan:
 				timer.Stop()
@@ -89,6 +84,21 @@ func (s *SchedulerService) Start() {
 			}
 		}
 	}()
+}
+
+func (s *SchedulerService) calculateDuration() time.Duration {
+	var duration time.Duration
+	switch s.config.Unit {
+	case "minute":
+		duration = time.Duration(s.config.Interval) * time.Minute
+	case "hour":
+		duration = time.Duration(s.config.Interval) * time.Hour
+	case "day":
+		duration = time.Duration(s.config.Interval) * 24 * time.Hour
+	default:
+		duration = 24 * time.Hour
+	}
+	return duration
 }
 
 func (s *SchedulerService) Stop() {
@@ -130,9 +140,13 @@ func (s *SchedulerService) performCleanup() {
 
 // 提供给外部更新配置的方法
 func (s *SchedulerService) UpdateConfig(newConfig CleanupConfig) {
-	s.config = newConfig
+	s.config.Enabled = newConfig.Enabled
+	s.config.Interval = newConfig.Interval
+	s.config.Unit = newConfig.Unit
+	// 重启计时逻辑通过重新计算 NextRun 实现
+	s.config.NextRun = time.Now().Add(s.calculateDuration())
 	s.saveConfig()
-	log.Printf("[Scheduler] 自动清理规则已更新: 每 %d %s (启用: %v)\n", 
+	log.Printf("[Scheduler] 自动清理规则已更新: 每 %d %s (启用: %v)\n",
 		s.config.Interval, s.config.Unit, s.config.Enabled)
 }
 

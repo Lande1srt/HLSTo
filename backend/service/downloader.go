@@ -1204,20 +1204,44 @@ func (ds *DownloaderService) checkIsVideoURL(urlStr, referer, cookie string) boo
 	lowerURL := strings.ToLower(urlStr)
 	videoExts := []string{".mp4", ".mkv", ".avi", ".flv", ".mov", ".wmv", ".webm", ".m4v", ".ts", ".3gp", ".rmvb"}
 	
-	// 优先通过后缀名判断
+	// 1. 优先通过后缀名判断
 	for _, ext := range videoExts {
 		if strings.Contains(lowerURL, ext) {
 			return true
 		}
 	}
 
-	// 如果后缀不明显，尝试发送 HEAD 请求检查 Content-Type
+	// 2. 尝试发送 HEAD 请求检查 Content-Type
 	client := &http.Client{Timeout: 5 * time.Second}
 	req, err := http.NewRequest("HEAD", urlStr, nil)
+	if err == nil {
+		if referer != "" {
+			req.Header.Set("Referer", referer)
+		}
+		if cookie != "" {
+			req.Header.Set("Cookie", cookie)
+		}
+		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+
+		resp, err := client.Do(req)
+		if err == nil {
+			defer resp.Body.Close()
+			contentType := strings.ToLower(resp.Header.Get("Content-Type"))
+			if strings.HasPrefix(contentType, "video/") || 
+			   strings.Contains(contentType, "application/vnd.apple.mpegurl") || 
+			   strings.Contains(contentType, "application/x-mpegurl") {
+				return true
+			}
+		}
+	}
+
+	// 3. 如果 HEAD 请求失败或被禁止，尝试发送 GET 请求并读取前 512 字节进行嗅探
+	req, err = http.NewRequest("GET", urlStr, nil)
 	if err != nil {
 		return false
 	}
-
+	// 设置 Range 只读取开头，节省流量
+	req.Header.Set("Range", "bytes=0-511")
 	if referer != "" {
 		req.Header.Set("Referer", referer)
 	}
@@ -1232,10 +1256,21 @@ func (ds *DownloaderService) checkIsVideoURL(urlStr, referer, cookie string) boo
 	}
 	defer resp.Body.Close()
 
+	// 再次检查 Content-Type
 	contentType := strings.ToLower(resp.Header.Get("Content-Type"))
-	return strings.HasPrefix(contentType, "video/") || 
-		   strings.Contains(contentType, "application/vnd.apple.mpegurl") || 
-		   strings.Contains(contentType, "application/x-mpegurl")
+	if strings.HasPrefix(contentType, "video/") {
+		return true
+	}
+
+	// 使用 http.DetectContentType 进行嗅探
+	buffer := make([]byte, 512)
+	n, _ := io.ReadFull(resp.Body, buffer)
+	if n > 0 {
+		detectedType := http.DetectContentType(buffer[:n])
+		return strings.HasPrefix(detectedType, "video/")
+	}
+
+	return false
 }
 
 func (ds *DownloaderService) downloadSingleFile(taskID string, urlStr string, savePath string, referer string, cookie string, ctrl *taskControl) bool {
@@ -1262,34 +1297,48 @@ func (ds *DownloaderService) downloadSingleFile(taskID string, urlStr string, sa
 		},
 	}
 
-	req, err := http.NewRequest("GET", urlStr, nil)
-	if err != nil {
-		ds.sendLog(taskID, "error", fmt.Sprintf("创建请求失败: %v", err))
-		return false
-	}
+	maxRetries := 3
+	var resp *http.Response
+	var err error
 
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-	if referer != "" {
-		req.Header.Set("Referer", referer)
-		if u, err := url.Parse(referer); err == nil {
-			req.Header.Set("Origin", u.Scheme+"://"+u.Host)
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		req, err = http.NewRequest("GET", urlStr, nil)
+		if err != nil {
+			ds.sendLog(taskID, "error", fmt.Sprintf("创建请求失败: %v", err))
+			return false
+		}
+
+		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+		if referer != "" {
+			req.Header.Set("Referer", referer)
+			if u, err := url.Parse(referer); err == nil {
+				req.Header.Set("Origin", u.Scheme+"://"+u.Host)
+			}
+		}
+		if cookie != "" {
+			req.Header.Set("Cookie", cookie)
+		}
+
+		resp, err = client.Do(req)
+		if err == nil && resp.StatusCode == http.StatusOK {
+			break
+		}
+		
+		if resp != nil {
+			resp.Body.Close()
+		}
+		
+		if attempt < maxRetries-1 {
+			ds.sendLog(taskID, "warn", fmt.Sprintf("下载请求失败，正在进行第 %d 次重试...", attempt+1))
+			time.Sleep(2 * time.Second)
 		}
 	}
-	if cookie != "" {
-		req.Header.Set("Cookie", cookie)
-	}
 
-	resp, err := client.Do(req)
-	if err != nil {
-		ds.sendLog(taskID, "error", fmt.Sprintf("发起请求失败: %v", err))
+	if err != nil || resp == nil || resp.StatusCode != http.StatusOK {
+		ds.sendLog(taskID, "error", "下载请求多次尝试后依然失败")
 		return false
 	}
 	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		ds.sendLog(taskID, "error", fmt.Sprintf("服务器返回错误状态码: %d", resp.StatusCode))
-		return false
-	}
 
 	totalSize := resp.ContentLength
 	ds.taskManager.mu.Lock()

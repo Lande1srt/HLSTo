@@ -37,8 +37,22 @@ const showBrowser = ref(false)
 const cleanupConfig = ref({
   enabled: false,
   interval: 1,
-  unit: 'day'
+  unit: 'day',
+  lastRun: '',
+  nextRun: ''
 })
+
+const formatDate = (dateStr: string) => {
+  if (!dateStr || dateStr.startsWith('0001')) return '从未执行'
+  const date = new Date(dateStr)
+  return date.toLocaleString('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit'
+  })
+}
 
 onMounted(async () => {
   await settingsStore.loadSettings()
@@ -372,24 +386,42 @@ const reset = () => {
           </label>
         </div>
 
-        <div v-if="cleanupConfig.enabled" class="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div>
-            <label class="block text-sm font-medium text-gray-300 mb-2">清理间隔数值</label>
-            <input v-model.number="cleanupConfig.interval" type="number" min="1" class="input-field" />
+        <div v-if="cleanupConfig.enabled" class="mt-4 space-y-4">
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <label class="block text-sm font-medium text-gray-300 mb-2">清理间隔数值</label>
+                <input
+                  v-model.number="cleanupConfig.interval"
+                  type="number"
+                  min="1"
+                  class="input-field"
+                />
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-300 mb-2">间隔单位</label>
+                <select v-model="cleanupConfig.unit" class="input-field">
+                  <option value="minute">分钟</option>
+                  <option value="hour">小时</option>
+                  <option value="day">天</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="bg-dark-400/50 rounded-lg p-3 flex flex-wrap gap-4 text-xs">
+              <div class="flex items-center gap-2">
+                <span class="text-gray-500 text-[10px] uppercase font-bold tracking-wider">上次执行:</span>
+                <span class="text-gray-300">{{ formatDate(cleanupConfig.lastRun) }}</span>
+              </div>
+              <div class="flex items-center gap-2">
+                <span class="text-gray-500 text-[10px] uppercase font-bold tracking-wider">下次预计:</span>
+                <span class="text-primary font-medium">{{ formatDate(cleanupConfig.nextRun) }}</span>
+              </div>
+            </div>
           </div>
-          <div>
-            <label class="block text-sm font-medium text-gray-300 mb-2">间隔单位</label>
-            <select v-model="cleanupConfig.unit" class="input-field">
-              <option value="minute">分钟</option>
-              <option value="hour">小时</option>
-              <option value="day">天</option>
-            </select>
-          </div>
+          <p class="text-xs text-gray-500 mt-2">
+            根据程序启动时间计时。每次达到间隔时间后，系统将自动调用“清理缓存”逻辑移除所有 download_ 开头的临时目录。
+          </p>
         </div>
-        <p class="text-xs text-gray-500 mt-2">
-          根据程序启动时间计时。每次达到间隔时间后，系统将自动调用“清理缓存”逻辑移除所有 download_ 开头的临时目录。
-        </p>
-      </div>
     </div>
 
     <div class="card">
