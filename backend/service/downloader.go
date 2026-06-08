@@ -203,7 +203,7 @@ func (ds *DownloaderService) download(taskID string, req model.DownloadRequest) 
 			return
 		}
 
-		if ok := ds.checkTsDownDir(taskID, cacheDir, tsList); !ok {
+		if ok := ds.checkTsDownDir(taskID, cacheDir, tsList, false); !ok {
 			ds.sendStatus(taskID, model.StatusFailed, "合并前检查失败: 文件不完整")
 			return
 		}
@@ -808,7 +808,12 @@ func (ds *DownloaderService) downloader(taskID string, maxGoroutines int, key st
 	return true
 }
 
-func (ds *DownloaderService) checkTsDownDir(taskID string, dir string, tsList []TsInfo) bool {
+func (ds *DownloaderService) checkTsDownDir(taskID string, dir string, tsList []TsInfo, forceMerge bool) bool {
+	if forceMerge {
+		ds.sendLog(taskID, "warn", "强制合并模式：跳过完整性检查")
+		return true
+	}
+	
 	ds.sendLog(taskID, "info", "正在进行合并前的文件完整性检查...")
 	var missingCount int
 	for _, ts := range tsList {
@@ -1028,7 +1033,7 @@ func (ds *DownloaderService) ResumeDownload(taskID string) {
 	}
 }
 
-func (ds *DownloaderService) RetryDownload(taskID string) error {
+func (ds *DownloaderService) RetryDownload(taskID string, mode string) error {
 	task, exists := ds.taskManager.GetTask(taskID)
 	if !exists {
 		return fmt.Errorf("任务不存在")
@@ -1036,6 +1041,38 @@ func (ds *DownloaderService) RetryDownload(taskID string) error {
 
 	if task.Status != model.StatusFailed && task.Status != model.StatusCompleted {
 		return fmt.Errorf("只有已停止或已完成的任务可以重试")
+	}
+
+	// 解析重试模式
+	retryMode := model.RetryMode(mode)
+	
+	// 如果是强制合并模式，直接执行合并
+	if retryMode == model.RetryModeForceMerge {
+		ds.sendStatus(taskID, model.StatusMerging, "正在强制合并...")
+		ds.sendLog(taskID, "info", "用户选择强制合并，将跳过缺失分片")
+		
+		// 获取任务路径信息
+		taskDir := filepath.Join(task.SavePath, task.Name)
+		cacheDir := filepath.Join(taskDir, "cache")
+		outputName := task.Name
+		
+		ctrl := ds.createControl(taskID)
+		mvName := ds.mergeTs(taskID, cacheDir, taskDir, outputName, ctrl)
+		if mvName != "" {
+			ds.sendStatus(taskID, model.StatusCompleted, "强制合并完成")
+			ds.sendLog(taskID, "info", fmt.Sprintf("视频已保存到: %s", mvName))
+			ds.taskManager.mu.Lock()
+			if t, exists := ds.taskManager.tasks[taskID]; exists {
+				t.Status = model.StatusCompleted
+				t.OutputPath = mvName
+				t.Progress = 100
+			}
+			ds.taskManager.mu.Unlock()
+			ds.taskManager.storage.UpdateTask(task)
+		} else {
+			ds.sendStatus(taskID, model.StatusFailed, "强制合并失败")
+		}
+		return nil
 	}
 
 	// 准备重试请求
@@ -1057,7 +1094,14 @@ func (ds *DownloaderService) RetryDownload(taskID string) error {
 	}
 
 	// 更新任务状态并广播
-	ds.sendStatus(taskID, model.StatusDownloading, "正在重试下载...")
+	if retryMode == model.RetryModeMissing {
+		ds.sendStatus(taskID, model.StatusDownloading, "正在重试下载缺失分片...")
+		ds.sendLog(taskID, "info", "重试模式：仅下载缺失的分片")
+	} else {
+		ds.sendStatus(taskID, model.StatusDownloading, "正在完全重新下载...")
+		ds.sendLog(taskID, "info", "重试模式：完全重新下载所有分片")
+	}
+	
 	ds.taskManager.mu.Lock()
 	task.Progress = 0
 	task.DownloadedSegments = 0

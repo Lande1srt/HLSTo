@@ -22,50 +22,82 @@ const webdavConfig = ref({
   remoteDir: ''
 })
 
-const openUploadBrowser = async (task: Task) => {
-  selectedTaskId.value = task.id
+const showRetryModal = ref(false)
+const selectedRetryTask = ref<Task | null>(null)
+
+const openRetryModal = (task: Task) => {
+  selectedRetryTask.value = task
+  showRetryModal.value = true
+}
+
+const confirmRetry = (mode: string) => {
+  showRetryModal.value = false
+  if (!selectedRetryTask.value) return
   
-  // 尝试获取任务自带的配置，如果没有则从全局设置中加载
-  if (task.webDAVURL) {
-    webdavConfig.value = {
-      url: task.webDAVURL,
-      username: task.webDAVUsername || '',
-      password: task.webDAVPassword || '',
-      remoteDir: task.webDAVRemoteDir || ''
-    }
-    showBrowser.value = true
-  } else {
-    // 加载全局设置
-    try {
-      const res = await settingsAPI.get()
-      if (res.data.code === 200) {
-        const s = res.data.data
-        webdavConfig.value = {
-          url: s.webDAVURL || '',
-          username: s.webDAVUsername || '',
-          password: s.webDAVPassword || '',
-          remoteDir: s.webDAVRemoteDir || ''
-        }
-        
-        if (!webdavConfig.value.url) {
-          alert('请先在设置中配置 WebDAV 地址，或手动填写地址')
-        }
-        showBrowser.value = true
+  if (mode === 'retry_upload') {
+    // 打开 WebDAV 目录选择模态框
+    selectedTaskId.value = selectedRetryTask.value.id
+    
+    // 尝试获取任务自带的配置，如果没有则从全局设置中加载
+    if (selectedRetryTask.value.webDAVURL) {
+      webdavConfig.value = {
+        url: selectedRetryTask.value.webDAVURL,
+        username: selectedRetryTask.value.webDAVUsername || '',
+        password: selectedRetryTask.value.webDAVPassword || '',
+        remoteDir: selectedRetryTask.value.webDAVRemoteDir || ''
       }
-    } catch (err) {
-      alert('加载 WebDAV 配置失败')
+      showBrowser.value = true
+    } else {
+      // 需要从设置中加载配置
+      loadWebDAVConfigAndOpenBrowser()
     }
+  } else {
+    downloadStore.retryDownload(selectedRetryTask.value.id, mode)
   }
 }
 
+const loadWebDAVConfigAndOpenBrowser = async () => {
+  try {
+    const res = await settingsAPI.get()
+    if (res.data.code === 200) {
+      const s = res.data.data
+      webdavConfig.value = {
+        url: s.webDAVURL || '',
+        username: s.webDAVUsername || '',
+        password: s.webDAVPassword || '',
+        remoteDir: s.webDAVRemoteDir || ''
+      }
+      
+      if (!webdavConfig.value.url) {
+        alert('请先在设置中配置 WebDAV 地址')
+        return
+      }
+      showBrowser.value = true
+    }
+  } catch (err) {
+    alert('加载 WebDAV 配置失败')
+  }
+}
+
+const isTaskCompleted = (task: Task) => {
+  return task.status === 'completed' || task.status === 'failed'
+}
+
 const onDirSelect = (path: string) => {
-  downloadStore.uploadTask(selectedTaskId.value, {
-    enabled: true,
-    url: webdavConfig.value.url,
-    username: webdavConfig.value.username,
-    password: webdavConfig.value.password,
-    remoteDir: path
-  })
+  // 如果是从重试模态框触发的上传，调用 retryUpload
+  if (selectedRetryTask.value) {
+    downloadStore.retryUpload(selectedRetryTask.value.id)
+    selectedRetryTask.value = null
+  } else {
+    // 否则调用普通的 uploadTask
+    downloadStore.uploadTask(selectedTaskId.value, {
+      enabled: true,
+      url: webdavConfig.value.url,
+      username: webdavConfig.value.username,
+      password: webdavConfig.value.password,
+      remoteDir: path
+    })
+  }
 }
 
 const wsRetryTimer = ref<number | null>(null)
@@ -318,17 +350,7 @@ onUnmounted(() => {
               </span>
               <button
                 v-if="task.status === 'failed' || task.status === 'completed'"
-                @click="openUploadBrowser(task)"
-                class="text-gray-400 hover:text-blue-400 transition-colors"
-                title="上传至 WebDAV"
-              >
-                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
-                </svg>
-              </button>
-              <button
-                v-if="task.status === 'failed' || task.status === 'completed'"
-                @click="downloadStore.retryDownload(task.id)"
+                @click="openRetryModal(task)"
                 class="text-gray-400 hover:text-primary transition-colors"
                 title="重试"
               >
@@ -346,15 +368,6 @@ onUnmounted(() => {
               </button>
 
               <button
-                v-if="(task.status === 'failed' || task.status === 'completed') && task.outputPath"
-                @click="downloadStore.retryUpload(task.id)"
-                class="p-2 text-gray-400 hover:text-blue-400 transition-colors"
-                title="重试上传"
-              >
-                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M3 22v-6h6"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/></svg>
-              </button>
-
-              <button
                 @click="deleteTask(task.id)"
                 class="p-2 text-gray-400 hover:text-red-400 transition-colors"
                 title="删除记录"
@@ -364,13 +377,13 @@ onUnmounted(() => {
             </div>
           </div>
 
-          <div v-if="task.status === 'downloading' || task.status === 'uploading' || task.status === 'paused'" class="mb-3">
+          <div v-if="task.status === 'downloading' || task.status === 'merging' || task.status === 'uploading' || task.status === 'paused'" class="mb-3">
             <div class="flex justify-between text-xs text-gray-400 mb-1">
-                <span v-if="task.status === 'uploading'">
-                  {{ formatSize(task.downloadedSegments) }} / {{ formatSize(task.totalSegments) }}
+                <span v-if="(task.status === 'downloading' || task.status === 'merging') && task.url?.toLowerCase().includes('.m3u8')">
+                  {{ task.downloadedSegments }} / {{ task.totalSegments }} 片段
                 </span>
                 <span v-else>
-                  {{ task.downloadedSegments }} / {{ task.totalSegments }} 片段
+                  {{ formatSize(task.downloadedSegments) }} / {{ formatSize(task.totalSegments) }}
                 </span>
                 <span>{{ task.progress.toFixed(1) }}%</span>
               </div>
@@ -407,6 +420,58 @@ onUnmounted(() => {
       @close="showBrowser = false"
       @select="onDirSelect"
     />
+
+    <!-- 重试方式选择模态框 -->
+    <div v-if="showRetryModal" class="fixed inset-0 bg-black/60 flex items-center justify-center z-50" @click.self="showRetryModal = false">
+      <div class="bg-dark-200 rounded-xl p-6 max-w-md w-full mx-4 border border-white/10">
+        <h3 class="text-lg font-semibold mb-4 text-gray-200">选择重试方式</h3>
+        
+        <div class="space-y-3">
+          <button
+            @click="confirmRetry('retry_missing')"
+            class="w-full text-left p-4 rounded-lg bg-dark-300 hover:bg-dark-400 border border-white/10 hover:border-primary/50 transition-colors"
+          >
+            <div class="font-medium text-gray-200">重试下载缺失的分片</div>
+            <div class="text-sm text-gray-400 mt-1">仅重新下载丢失的片段，保留已下载的部分</div>
+          </button>
+
+          <button
+            @click="confirmRetry('full_redownload')"
+            class="w-full text-left p-4 rounded-lg bg-dark-300 hover:bg-dark-400 border border-white/10 hover:border-primary/50 transition-colors"
+          >
+            <div class="font-medium text-gray-200">完全重新下载</div>
+            <div class="text-sm text-gray-400 mt-1">删除已有文件，从头开始下载所有分片</div>
+          </button>
+
+          <button
+            @click="confirmRetry('force_merge')"
+            class="w-full text-left p-4 rounded-lg bg-dark-300 hover:bg-dark-400 border border-white/10 hover:border-yellow-500/50 transition-colors"
+          >
+            <div class="font-medium text-yellow-400">忽略缺失分片强制合并</div>
+            <div class="text-sm text-gray-400 mt-1">跳过缺失片段直接生成视频，可能导致播放问题</div>
+          </button>
+
+          <button
+            @click="confirmRetry('retry_upload')"
+            :disabled="!selectedRetryTask || !isTaskCompleted(selectedRetryTask)"
+            class="w-full text-left p-4 rounded-lg bg-dark-300 hover:bg-dark-400 border border-white/10 transition-colors"
+            :class="selectedRetryTask && isTaskCompleted(selectedRetryTask) ? 'hover:border-blue-500/50' : 'opacity-50 cursor-not-allowed'"
+          >
+            <div class="font-medium" :class="selectedRetryTask && isTaskCompleted(selectedRetryTask) ? 'text-blue-400' : 'text-gray-500'">上传至 WebDAV</div>
+            <div class="text-sm text-gray-400 mt-1">
+              {{ selectedRetryTask && isTaskCompleted(selectedRetryTask) ? '将已下载完成的文件上传到 WebDAV 服务器' : '需等待下载/合并完成后才能上传' }}
+            </div>
+          </button>
+        </div>
+
+        <button
+          @click="showRetryModal = false"
+          class="w-full mt-4 px-4 py-2 rounded-lg bg-dark-300 hover:bg-dark-400 text-gray-400 hover:text-gray-200 transition-colors"
+        >
+          取消
+        </button>
+      </div>
+    </div>
   </div>
 </template>
 

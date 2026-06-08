@@ -8,7 +8,6 @@ const downloadStore = useDownloadStore()
 const settingsStore = useSettingsStore()
 
 const url = ref('')
-const threadCount = ref(24)
 const outputName = ref('movie')
 const hostType = ref('v1')
 const cookie = ref('')
@@ -42,6 +41,30 @@ const deleteAfterUpload = ref(false)
 const showBrowser = ref(false)
 const showMoreParams = ref(false)
 const analyzing = ref(false)
+
+const showRetryModal = ref(false)
+
+const handleRetryClick = () => {
+  if (downloadStore.currentTask?.url?.toLowerCase().includes('.m3u8')) {
+    showRetryModal.value = true
+  } else {
+    downloadStore.retryDownload(downloadStore.currentTask!.id)
+  }
+}
+
+const confirmRetry = (mode: string) => {
+  showRetryModal.value = false
+  
+  if (mode === 'retry_upload') {
+    // 上传至 WebDAV
+    if (downloadStore.currentTask) {
+      downloadStore.retryUpload(downloadStore.currentTask.id)
+    }
+  } else {
+    // 其他重试模式
+    downloadStore.retryDownload(downloadStore.currentTask!.id, mode)
+  }
+}
 
 const onDirSelect = (path: string) => {
   webDAVRemoteDir.value = path
@@ -79,7 +102,6 @@ const manualAnalyze = async () => {
 
 onMounted(async () => {
   await settingsStore.loadSettings()
-  threadCount.value = settingsStore.settings.defaultThreadCount
   outputName.value = settingsStore.settings.defaultOutputName
   hostType.value = settingsStore.settings.hostType
   autoClear.value = settingsStore.settings.autoClear
@@ -109,7 +131,7 @@ const startDownload = async () => {
   try {
     await downloadStore.startDownload({
       url: url.value.trim(),
-      threadCount: threadCount.value,
+      threadCount: settingsStore.settings.defaultThreadCount,
       outputName: outputName.value.trim(),
       hostType: hostType.value,
       cookie: cookie.value.trim(),
@@ -145,7 +167,6 @@ const reset = () => {
   url.value = ''
   
   // 重新从设置中拉取默认配置
-  threadCount.value = settingsStore.settings.defaultThreadCount
   outputName.value = settingsStore.settings.defaultOutputName
   hostType.value = settingsStore.settings.hostType
   autoClear.value = settingsStore.settings.autoClear
@@ -160,6 +181,16 @@ const formatSize = (kb: number) => {
   if (kb < 1024) return `${kb} KB`
   return `${(kb / 1024).toFixed(1)} MB`
 }
+
+const isM3U8Download = computed(() => {
+  return downloadStore.currentTask?.url?.toLowerCase().includes('.m3u8') ?? false
+})
+
+const isTaskCompleted = computed(() => {
+  const task = downloadStore.currentTask
+  if (!task) return false
+  return task.status === 'completed' || task.status === 'failed'
+})
 </script>
 
 <template>
@@ -193,33 +224,17 @@ const formatSize = (kb: number) => {
           </div>
         </div>
 
-        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div>
-            <label class="block text-sm font-medium text-gray-300 mb-2">
-              线程数: {{ threadCount }}
-            </label>
-            <input
-              v-model.number="threadCount"
-              type="range"
-              min="1"
-              max="100"
-              class="w-full"
-              :disabled="downloadStore.isDownloading"
-            />
-          </div>
-
-          <div>
-            <label class="block text-sm font-medium text-gray-300 mb-2">
-              输出文件名
-            </label>
-            <input
-              v-model="outputName"
-              type="text"
-              placeholder="movie"
-              class="input-field"
-              :disabled="downloadStore.isDownloading"
-            />
-          </div>
+        <div>
+          <label class="block text-sm font-medium text-gray-300 mb-2">
+            输出文件名
+          </label>
+          <input
+            v-model="outputName"
+            type="text"
+            placeholder="movie"
+            class="input-field"
+            :disabled="downloadStore.isDownloading"
+          />
         </div>
 
         <!-- 更多参数折叠块 -->
@@ -397,7 +412,7 @@ const formatSize = (kb: number) => {
 
           <button
             v-if="!downloadStore.isDownloading && downloadStore.currentTask && (downloadStore.currentTask.status === 'failed' || downloadStore.currentTask.status === 'completed')"
-            @click="downloadStore.retryDownload(downloadStore.currentTask.id)"
+            @click="handleRetryClick"
             class="btn-primary"
           >
             重试下载
@@ -429,11 +444,11 @@ const formatSize = (kb: number) => {
       <div class="space-y-4">
         <div>
           <div class="flex justify-between text-sm text-gray-400 mb-2">
-            <span v-if="downloadStore.currentTask.status === 'uploading'">
-              {{ formatSize(downloadStore.currentTask.downloadedSegments) }} / {{ formatSize(downloadStore.currentTask.totalSegments) }}
+            <span v-if="(downloadStore.currentTask.status === 'downloading' || downloadStore.currentTask.status === 'merging') && isM3U8Download">
+              {{ downloadStore.currentTask.downloadedSegments }} / {{ downloadStore.currentTask.totalSegments }} 片段
             </span>
             <span v-else>
-              {{ downloadStore.currentTask.downloadedSegments }} / {{ downloadStore.currentTask.totalSegments }} 片段
+              {{ formatSize(downloadStore.currentTask.downloadedSegments) }} / {{ formatSize(downloadStore.currentTask.totalSegments) }}
             </span>
             <span>{{ downloadStore.currentTask.progress.toFixed(1) }}%</span>
           </div>
@@ -476,9 +491,12 @@ const formatSize = (kb: number) => {
           </div>
 
           <div>
-            <span class="text-gray-400">片段</span>
+            <span class="text-gray-400">{{ (downloadStore.currentTask.status === 'downloading' || downloadStore.currentTask.status === 'merging') && isM3U8Download ? '片段' : '容量' }}</span>
             <div class="font-mono">
-              {{ downloadStore.currentTask.downloadedSegments }} / {{ downloadStore.currentTask.totalSegments }}
+              {{ (downloadStore.currentTask.status === 'downloading' || downloadStore.currentTask.status === 'merging') && isM3U8Download
+                ? `${downloadStore.currentTask.downloadedSegments} / ${downloadStore.currentTask.totalSegments}` 
+                : `${formatSize(downloadStore.currentTask.downloadedSegments)} / ${formatSize(downloadStore.currentTask.totalSegments)}` 
+              }}
             </div>
           </div>
 
@@ -549,6 +567,58 @@ const formatSize = (kb: number) => {
       @close="showBrowser = false"
       @select="onDirSelect"
     />
+
+    <!-- 重试方式选择模态框 -->
+    <div v-if="showRetryModal" class="fixed inset-0 bg-black/60 flex items-center justify-center z-50" @click.self="showRetryModal = false">
+      <div class="bg-dark-200 rounded-xl p-6 max-w-md w-full mx-4 border border-white/10">
+        <h3 class="text-lg font-semibold mb-4 text-gray-200">选择重试方式</h3>
+        
+        <div class="space-y-3">
+          <button
+            @click="confirmRetry('retry_missing')"
+            class="w-full text-left p-4 rounded-lg bg-dark-300 hover:bg-dark-400 border border-white/10 hover:border-primary/50 transition-colors"
+          >
+            <div class="font-medium text-gray-200">重试下载缺失的分片</div>
+            <div class="text-sm text-gray-400 mt-1">仅重新下载丢失的片段，保留已下载的部分</div>
+          </button>
+
+          <button
+            @click="confirmRetry('full_redownload')"
+            class="w-full text-left p-4 rounded-lg bg-dark-300 hover:bg-dark-400 border border-white/10 hover:border-primary/50 transition-colors"
+          >
+            <div class="font-medium text-gray-200">完全重新下载</div>
+            <div class="text-sm text-gray-400 mt-1">删除已有文件，从头开始下载所有分片</div>
+          </button>
+
+          <button
+            @click="confirmRetry('force_merge')"
+            class="w-full text-left p-4 rounded-lg bg-dark-300 hover:bg-dark-400 border border-white/10 hover:border-yellow-500/50 transition-colors"
+          >
+            <div class="font-medium text-yellow-400">忽略缺失分片强制合并</div>
+            <div class="text-sm text-gray-400 mt-1">跳过缺失片段直接生成视频，可能导致播放问题</div>
+          </button>
+
+          <button
+            @click="confirmRetry('retry_upload')"
+            :disabled="!isTaskCompleted"
+            class="w-full text-left p-4 rounded-lg bg-dark-300 hover:bg-dark-400 border border-white/10 transition-colors"
+            :class="isTaskCompleted ? 'hover:border-blue-500/50' : 'opacity-50 cursor-not-allowed'"
+          >
+            <div class="font-medium" :class="isTaskCompleted ? 'text-blue-400' : 'text-gray-500'">上传至 WebDAV</div>
+            <div class="text-sm text-gray-400 mt-1">
+              {{ isTaskCompleted ? '将已下载完成的文件上传到 WebDAV 服务器' : '需等待下载/合并完成后才能上传' }}
+            </div>
+          </button>
+        </div>
+
+        <button
+          @click="showRetryModal = false"
+          class="w-full mt-4 px-4 py-2 rounded-lg bg-dark-300 hover:bg-dark-400 text-gray-400 hover:text-gray-200 transition-colors"
+        >
+          取消
+        </button>
+      </div>
+    </div>
   </div>
 </template>
 

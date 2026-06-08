@@ -100,6 +100,7 @@ func (h *DownloadHandler) ResumeDownload(w http.ResponseWriter, r *http.Request)
 func (h *DownloadHandler) RetryDownload(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		TaskID string `json:"taskId"`
+		Mode   string `json:"mode"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -107,7 +108,7 @@ func (h *DownloadHandler) RetryDownload(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	err := h.downloaderService.RetryDownload(req.TaskID)
+	err := h.downloaderService.RetryDownload(req.TaskID, req.Mode)
 	if err != nil {
 		h.sendError(w, http.StatusInternalServerError, err.Error())
 		return

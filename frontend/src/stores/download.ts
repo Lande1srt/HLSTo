@@ -185,10 +185,10 @@ export const useDownloadStore = defineStore('download', () => {
     }
   }
 
-  const retryDownload = async (taskId: string) => {
+  const retryDownload = async (taskId: string, mode?: string) => {
     try {
       addLog('info', '正在重新启动下载任务...')
-      const response = await downloadAPI.retry(taskId)
+      const response = await downloadAPI.retry(taskId, mode)
       if (response.data.code === 200) {
         addLog('info', '重试成功，开始下载')
         // 如果是当前正在查看的任务，需要重新连接 WS

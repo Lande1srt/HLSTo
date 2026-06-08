@@ -51,7 +51,7 @@ export const downloadAPI = {
 
   resume: (taskId: string) => api.post('/download/resume', { taskId }),
 
-  retry: (taskId: string) => api.post('/download/retry', { taskId }),
+  retry: (taskId: string, mode?: string) => api.post('/download/retry', { taskId, mode }),
 
   upload: (taskId: string, config?: Record<string, unknown>) => api.post('/download/upload', { taskId, config }),
 

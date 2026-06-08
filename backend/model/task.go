@@ -14,6 +14,14 @@ const (
 	StatusFailed      TaskStatus = "failed"
 )
 
+type RetryMode string
+
+const (
+	RetryModeMissing     RetryMode = "retry_missing"
+	RetryModeRedownload  RetryMode = "full_redownload"
+	RetryModeForceMerge  RetryMode = "force_merge"
+)
+
 type Task struct {
 	ID                 string     `json:"id"`
 	URL                string     `json:"url"`
