@@ -1,5 +1,7 @@
 {
   "enabled": true,
   "interval": 1,
-  "unit": "day"
+  "unit": "hour",
+  "lastRun": "0001-01-01T00:00:00Z",
+  "nextRun": "2026-06-14T09:49:54.989038+08:00"
 }

@@ -24,6 +24,7 @@ type SchedulerService struct {
 	configPath string
 	config     CleanupConfig
 	stopChan   chan struct{}
+	timerChan  chan struct{} // 用于通知重新计算计时器
 }
 
 func NewSchedulerService(storage *storage.SQLiteStorage) *SchedulerService {
@@ -34,6 +35,7 @@ func NewSchedulerService(storage *storage.SQLiteStorage) *SchedulerService {
 		storage:    storage,
 		configPath: configPath,
 		stopChan:   make(chan struct{}),
+		timerChan:  make(chan struct{}, 1), // 带缓冲，避免发送阻塞
 	}
 	
 	s.loadConfig()
@@ -69,7 +71,6 @@ func (s *SchedulerService) Start() {
 		for {
 			duration := s.calculateDuration()
 			s.config.NextRun = time.Now().Add(duration)
-			// 不需要立即保存到文件，因为这些是内存中的计时状态
 
 			timer := time.NewTimer(duration)
 			select {
@@ -78,6 +79,12 @@ func (s *SchedulerService) Start() {
 					s.performCleanup()
 					s.config.LastRun = time.Now()
 				}
+			case <-s.timerChan:
+				// 配置更新，重新计算计时器
+				timer.Stop()
+				log.Printf("[Scheduler] 配置已更新，重新计算计时器: 每 %d %s\n",
+					s.config.Interval, s.config.Unit)
+				continue // 重新开始循环，使用新配置
 			case <-s.stopChan:
 				timer.Stop()
 				return
@@ -129,7 +136,9 @@ func (s *SchedulerService) performCleanup() {
 		for _, f := range files {
 			if f.IsDir() && strings.HasPrefix(f.Name(), "download_") {
 				err := os.RemoveAll(filepath.Join(dir, f.Name()))
-				if err == nil {
+				if err != nil {
+					log.Printf("[Scheduler] 删除缓存目录失败: %v\n", err)
+				} else {
 					count++
 				}
 			}
@@ -148,6 +157,14 @@ func (s *SchedulerService) UpdateConfig(newConfig CleanupConfig) {
 	s.saveConfig()
 	log.Printf("[Scheduler] 自动清理规则已更新: 每 %d %s (启用: %v)\n",
 		s.config.Interval, s.config.Unit, s.config.Enabled)
+	
+	// 通知计时器重新计算
+	select {
+	case s.timerChan <- struct{}{}:
+		// 成功发送信号
+	default:
+		// 如果通道已满（说明之前的信号还没处理），不阻塞
+	}
 }
 
 func (s *SchedulerService) GetConfig() CleanupConfig {

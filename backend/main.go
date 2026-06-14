@@ -61,8 +61,9 @@ func main() {
 
 	taskHandler := handler.NewTaskHandler(taskManager, downloaderService)
 	downloadHandler := handler.NewDownloadHandler(downloaderService, taskManager)
-	settingsHandler := handler.NewSettingsHandler(dbStorage, schedulerService)
+	settingsHandler := handler.NewSettingsHandler(dbStorage, schedulerService, downloaderService)
 	authHandler := handler.NewAuthHandler()
+	diskHandler := handler.NewDiskHandler()
 	wsHandler := websocket.NewWebSocketHandler(wsManager)
 
 	router := mux.NewRouter()
@@ -93,6 +94,9 @@ func main() {
 	protectedAPI.HandleFunc("/settings/clear-cache", settingsHandler.ClearCache).Methods("POST")
 	protectedAPI.HandleFunc("/settings/cleanup-config", settingsHandler.GetCleanupConfig).Methods("GET")
 	protectedAPI.HandleFunc("/settings/cleanup-config", settingsHandler.UpdateCleanupConfig).Methods("POST")
+	router.HandleFunc("/api/disk/info", diskHandler.GetDiskInfo).Methods("GET")
+	router.HandleFunc("/api/disk/all", diskHandler.GetAllDisks).Methods("GET")
+	router.HandleFunc("/api/disk/check-space", diskHandler.CheckSpace).Methods("POST")
 
 	router.HandleFunc("/ws", wsHandler.HandleWebSocket)
 

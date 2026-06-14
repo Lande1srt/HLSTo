@@ -16,6 +16,13 @@ export interface Settings {
   deleteAfterUpload: boolean
   taskSortOrder: string
   defaultReferer: string
+  downloadConcurrency: number
+  mergeConcurrency: number
+  uploadConcurrency: number
+  singleMode: boolean
+  enablePreDownloadCheck: boolean
+  minFreeSpaceMB: number
+  diskRefreshInterval: number
 }
 
 export const useSettingsStore = defineStore('settings', () => {
@@ -32,7 +39,14 @@ export const useSettingsStore = defineStore('settings', () => {
     webDAVRemoteDir: '',
     deleteAfterUpload: false,
     taskSortOrder: 'desc',
-    defaultReferer: ''
+    defaultReferer: '',
+    downloadConcurrency: 1,
+    mergeConcurrency: 1,
+    uploadConcurrency: 1,
+    singleMode: false,
+    enablePreDownloadCheck: true,
+    minFreeSpaceMB: 500,
+    diskRefreshInterval: 10
   })
 
   const loadSettings = async () => {

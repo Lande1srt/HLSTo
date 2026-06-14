@@ -10,6 +10,7 @@ const downloadStore = useDownloadStore()
 const settingsStore = useSettingsStore()
 const tasks = ref<Task[]>([])
 const filter = ref<'all' | 'pending' | 'downloading' | 'merging' | 'uploading' | 'completed' | 'failed' | 'paused'>('all')
+const searchKeyword = ref('')
 const loading = ref(false)
 const ws = ref<WebSocket | null>(null)
 
@@ -35,10 +36,8 @@ const confirmRetry = (mode: string) => {
   if (!selectedRetryTask.value) return
   
   if (mode === 'retry_upload') {
-    // 打开 WebDAV 目录选择模态框
     selectedTaskId.value = selectedRetryTask.value.id
     
-    // 尝试获取任务自带的配置，如果没有则从全局设置中加载
     if (selectedRetryTask.value.webDAVURL) {
       webdavConfig.value = {
         url: selectedRetryTask.value.webDAVURL,
@@ -48,7 +47,6 @@ const confirmRetry = (mode: string) => {
       }
       showBrowser.value = true
     } else {
-      // 需要从设置中加载配置
       loadWebDAVConfigAndOpenBrowser()
     }
   } else {
@@ -84,12 +82,10 @@ const isTaskCompleted = (task: Task) => {
 }
 
 const onDirSelect = (path: string) => {
-  // 如果是从重试模态框触发的上传，调用 retryUpload
   if (selectedRetryTask.value) {
     downloadStore.retryUpload(selectedRetryTask.value.id)
     selectedRetryTask.value = null
   } else {
-    // 否则调用普通的 uploadTask
     downloadStore.uploadTask(selectedTaskId.value, {
       enabled: true,
       url: webdavConfig.value.url,
@@ -108,7 +104,7 @@ const connectGlobalWebSocket = () => {
   }
 
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-  const wsUrl = `${protocol}//${window.location.host}/ws` // taskId is empty for global updates
+  const wsUrl = `${protocol}//${window.location.host}/ws`
 
   ws.value = new WebSocket(wsUrl)
 
@@ -128,14 +124,13 @@ const connectGlobalWebSocket = () => {
             break
           case 'status':
             task.status = data.status
-            task.error = data.message || '' // 实时更新消息内容（如“下载并上传完成”）
+            task.error = data.message || ''
             if (data.status === 'completed' && data.outputPath) {
               task.outputPath = data.outputPath
             }
             break
         }
       } else if (data.type === 'status' && data.status === 'downloading') {
-        // Optional: if a new task started, we might want to refresh the list
         loadTasks()
       }
     } catch (error) {
@@ -144,10 +139,9 @@ const connectGlobalWebSocket = () => {
   }
 
   ws.value.onclose = () => {
-    // Retry connection after a delay if still on this page
     if (wsRetryTimer.value) window.clearTimeout(wsRetryTimer.value)
     wsRetryTimer.value = window.setTimeout(() => {
-      if (ws.value === null) return // already unmounted
+      if (ws.value === null) return
       connectGlobalWebSocket()
     }, 5000)
   }
@@ -198,7 +192,17 @@ const filteredTasks = computed(() => {
     result = result.filter((t: { status: any }) => t.status === filter.value)
   }
   
-  // 严格按创建时间排序，确保“队列顺序”
+  // 搜索过滤
+  if (searchKeyword.value.trim()) {
+    const keyword = searchKeyword.value.toLowerCase().trim()
+    result = result.filter((t: Task) => {
+      const name = t.name?.toLowerCase() || ''
+      const url = t.url?.toLowerCase() || ''
+      const outputPath = t.outputPath?.toLowerCase() || ''
+      return name.includes(keyword) || url.includes(keyword) || outputPath.includes(keyword)
+    })
+  }
+  
   return [...result].sort((a, b) => {
     const timeA = new Date(a.createdAt).getTime()
     const timeB = new Date(b.createdAt).getTime()
@@ -209,7 +213,6 @@ const filteredTasks = computed(() => {
         : timeA - timeB
     }
     
-    // 如果时间完全一致（极少见），按 ID 排序以保证排序稳定性
     return a.id.localeCompare(b.id)
   })
 })
@@ -230,21 +233,21 @@ const formatDate = (dateStr: string) => {
 const getStatusColor = (status: Task['status']) => {
   switch (status) {
     case 'pending':
-      return 'text-yellow-500 bg-yellow-500/10'
+      return 'text-yellow-600 bg-yellow-100'
     case 'downloading':
-      return 'text-primary bg-primary/10'
+      return 'text-blue-600 bg-blue-100'
     case 'merging':
-      return 'text-purple-400 bg-purple-400/10'
+      return 'text-purple-600 bg-purple-100'
     case 'uploading':
-      return 'text-blue-400 bg-blue-400/10'
+      return 'text-blue-600 bg-blue-100'
     case 'paused':
-      return 'text-yellow-400 bg-yellow-400/10'
+      return 'text-yellow-600 bg-yellow-100'
     case 'completed':
-      return 'text-green-400 bg-green-400/10'
+      return 'text-green-600 bg-green-100'
     case 'failed':
-      return 'text-red-400 bg-red-400/10'
+      return 'text-red-600 bg-red-100'
     default:
-      return 'text-gray-400 bg-gray-400/10'
+      return 'text-gray-600 bg-gray-100'
   }
 }
 
@@ -252,6 +255,73 @@ const formatSize = (kb: number) => {
   if (kb <= 0) return '0 KB'
   if (kb < 1024) return `${kb} KB`
   return `${(kb / 1024).toFixed(1)} MB`
+}
+
+// 解析速度字符串为 KB/s
+const parseSpeed = (speedStr: string): number => {
+  if (!speedStr || speedStr === '0 B/s') return 0
+  
+  const match = speedStr.match(/([\d.]+)\s*(KB|MB|GB)/)
+  if (!match) return 0
+  
+  const value = parseFloat(match[1])
+  const unit = match[2]
+  
+  switch (unit) {
+    case 'KB':
+      return value
+    case 'MB':
+      return value * 1024
+    case 'GB':
+      return value * 1024 * 1024
+    default:
+      return 0
+  }
+}
+
+// 格式化剩余时间
+const formatTime = (seconds: number): string => {
+  if (seconds <= 0) return '--:--'
+  
+  const hours = Math.floor(seconds / 3600)
+  const minutes = Math.floor((seconds % 3600) / 60)
+  const secs = Math.floor(seconds % 60)
+  
+  if (hours > 0) {
+    return `${hours}:${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`
+  }
+  return `${minutes}:${secs.toString().padStart(2, '0')}`
+}
+
+// 计算预计完成时间
+const getEstimatedTime = (task: Task): string => {
+  const status = task.status
+  if (status === 'completed' || status === 'failed' || status === 'pending' || status === 'paused') {
+    return ''
+  }
+  
+  const speedKBps = parseSpeed(task.speed)
+  if (speedKBps <= 0) return ''
+  
+  let downloadedKB: number
+  let totalKB: number
+  
+  if ((status === 'downloading' || status === 'merging') && task.url?.toLowerCase().includes('.m3u8')) {
+    downloadedKB = task.downloadedSegments * 512
+    totalKB = task.totalSegments * 512
+  } else {
+    downloadedKB = task.downloadedSegments
+    totalKB = task.totalSegments
+  }
+  
+  if (totalKB <= 0 || downloadedKB >= totalKB) return ''
+  
+  const remainingKB = totalKB - downloadedKB
+  const remainingSeconds = remainingKB / speedKBps
+  
+  if (remainingSeconds <= 0) return ''
+  
+  return formatTime(remainingSeconds)
 }
 
 onMounted(() => {
@@ -296,8 +366,8 @@ onUnmounted(() => {
           @click="filter = f as any"
           class="px-4 py-2 rounded-lg text-sm font-medium transition-colors whitespace-nowrap"
           :class="filter === f
-            ? 'bg-primary text-dark-200'
-            : 'bg-dark-300 text-gray-400 hover:text-white'"
+            ? 'bg-primary text-white'
+            : 'bg-gray-200 text-gray-600 hover:bg-gray-300'"
         >
           {{ 
             f === 'all' ? '全部' : 
@@ -312,6 +382,22 @@ onUnmounted(() => {
         </button>
       </div>
 
+      <!-- 搜索框 -->
+      <div class="mb-4">
+        <div class="relative">
+          <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400">
+            <circle cx="11" cy="11" r="8"/>
+            <path d="m21 21-4.35-4.35"/>
+          </svg>
+          <input
+            v-model="searchKeyword"
+            type="text"
+            placeholder="搜索任务名称、URL 或输出路径..."
+            class="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:ring-primary focus:border-primary outline-none transition-colors bg-white dark:bg-gray-800 text-gray-800 dark:text-gray-200 placeholder-gray-400"
+          />
+        </div>
+      </div>
+
       <div v-if="filteredTasks.length === 0" class="flex flex-col items-center justify-center py-12 text-gray-500">
         <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round" class="mb-4 opacity-20"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/></svg>
         <p>{{ loading ? '加载中...' : '暂无任务记录' }}</p>
@@ -321,14 +407,14 @@ onUnmounted(() => {
         <div
           v-for="task in filteredTasks"
           :key="task.id"
-          class="card hover:border-primary/20 transition-all group"
+          class="card hover:shadow-md transition-all"
         >
           <div class="flex items-start justify-between mb-3">
             <div class="flex-1 min-w-0">
-              <h3 class="font-semibold text-white truncate">
+              <h3 class="font-semibold text-gray-800 truncate">
                 {{ task.name }}.mp4
               </h3>
-              <p class="text-sm text-gray-400 truncate mt-1" :title="task.url">
+              <p class="text-sm text-gray-500 truncate mt-1" :title="task.url">
                 {{ task.url }}
               </p>
             </div>
@@ -351,7 +437,7 @@ onUnmounted(() => {
               <button
                 v-if="task.status === 'failed' || task.status === 'completed'"
                 @click="openRetryModal(task)"
-                class="text-gray-400 hover:text-primary transition-colors"
+                class="text-gray-500 hover:text-primary transition-colors"
                 title="重试"
               >
                 <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -361,7 +447,7 @@ onUnmounted(() => {
               <button
                 v-if="task.status === 'downloading' || task.status === 'uploading' || task.status === 'paused'"
                 @click="downloadStore.stopDownloadById(task.id)"
-                class="p-2 text-gray-400 hover:text-red-400 transition-colors"
+                class="p-2 text-gray-500 hover:text-red-500 transition-colors"
                 title="停止任务"
               >
                 <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/></svg>
@@ -369,7 +455,7 @@ onUnmounted(() => {
 
               <button
                 @click="deleteTask(task.id)"
-                class="p-2 text-gray-400 hover:text-red-400 transition-colors"
+                class="p-2 text-gray-500 hover:text-red-500 transition-colors"
                 title="删除记录"
               >
                 <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/></svg>
@@ -378,7 +464,7 @@ onUnmounted(() => {
           </div>
 
           <div v-if="task.status === 'downloading' || task.status === 'merging' || task.status === 'uploading' || task.status === 'paused'" class="mb-3">
-            <div class="flex justify-between text-xs text-gray-400 mb-1">
+            <div class="flex justify-between text-xs text-gray-500 mb-1">
                 <span v-if="(task.status === 'downloading' || task.status === 'merging') && task.url?.toLowerCase().includes('.m3u8')">
                   {{ task.downloadedSegments }} / {{ task.totalSegments }} 片段
                 </span>
@@ -397,15 +483,18 @@ onUnmounted(() => {
 
           <div class="flex items-center justify-between text-xs text-gray-500">
             <span>创建时间: {{ formatDate(task.createdAt) }}</span>
-            <span v-if="task.speed" class="font-mono">{{ task.speed }}</span>
+            <span v-if="task.speed" class="font-mono">
+              {{ task.speed }}
+            </span>
           </div>
 
-          <div v-if="task.outputPath" class="mt-2 text-xs text-gray-400 font-mono truncate">
+          <div v-if="task.outputPath" class="mt-2 text-xs text-gray-600 font-mono truncate">
             {{ task.outputPath }}
           </div>
 
-          <div v-if="task.error" class="mt-2 text-xs text-red-400">
-            {{ task.error }}
+          <div v-if="task.error" class="mt-2 text-xs flex justify-between items-center">
+            <span class="text-red-500">{{ task.error }}</span>
+            <span v-if="getEstimatedTime(task)" class="text-green-600">预计 {{ getEstimatedTime(task) }} 完成</span>
           </div>
         </div>
       </div>
@@ -421,44 +510,43 @@ onUnmounted(() => {
       @select="onDirSelect"
     />
 
-    <!-- 重试方式选择模态框 -->
-    <div v-if="showRetryModal" class="fixed inset-0 bg-black/60 flex items-center justify-center z-50" @click.self="showRetryModal = false">
-      <div class="bg-dark-200 rounded-xl p-6 max-w-md w-full mx-4 border border-white/10">
-        <h3 class="text-lg font-semibold mb-4 text-gray-200">选择重试方式</h3>
+    <div v-if="showRetryModal" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50" @click.self="showRetryModal = false">
+      <div class="retry-modal-content">
+        <h3 class="text-lg font-semibold mb-4">选择重试方式</h3>
         
         <div class="space-y-3">
           <button
             @click="confirmRetry('retry_missing')"
-            class="w-full text-left p-4 rounded-lg bg-dark-300 hover:bg-dark-400 border border-white/10 hover:border-primary/50 transition-colors"
+            class="retry-modal-btn"
           >
-            <div class="font-medium text-gray-200">重试下载缺失的分片</div>
-            <div class="text-sm text-gray-400 mt-1">仅重新下载丢失的片段，保留已下载的部分</div>
+            <div class="font-medium">重试下载缺失的分片</div>
+            <div class="text-sm mt-1">仅重新下载丢失的片段，保留已下载的部分</div>
           </button>
 
           <button
             @click="confirmRetry('full_redownload')"
-            class="w-full text-left p-4 rounded-lg bg-dark-300 hover:bg-dark-400 border border-white/10 hover:border-primary/50 transition-colors"
+            class="retry-modal-btn"
           >
-            <div class="font-medium text-gray-200">完全重新下载</div>
-            <div class="text-sm text-gray-400 mt-1">删除已有文件，从头开始下载所有分片</div>
+            <div class="font-medium">完全重新下载</div>
+            <div class="text-sm mt-1">删除已有文件，从头开始下载所有分片</div>
           </button>
 
           <button
             @click="confirmRetry('force_merge')"
-            class="w-full text-left p-4 rounded-lg bg-dark-300 hover:bg-dark-400 border border-white/10 hover:border-yellow-500/50 transition-colors"
+            class="retry-modal-btn force-merge"
           >
-            <div class="font-medium text-yellow-400">忽略缺失分片强制合并</div>
-            <div class="text-sm text-gray-400 mt-1">跳过缺失片段直接生成视频，可能导致播放问题</div>
+            <div class="font-medium">忽略缺失分片强制合并</div>
+            <div class="text-sm mt-1">跳过缺失片段直接生成视频，可能导致播放问题</div>
           </button>
 
           <button
             @click="confirmRetry('retry_upload')"
             :disabled="!selectedRetryTask || !isTaskCompleted(selectedRetryTask)"
-            class="w-full text-left p-4 rounded-lg bg-dark-300 hover:bg-dark-400 border border-white/10 transition-colors"
-            :class="selectedRetryTask && isTaskCompleted(selectedRetryTask) ? 'hover:border-blue-500/50' : 'opacity-50 cursor-not-allowed'"
+            class="retry-modal-btn upload-btn"
+            :class="{ disabled: !selectedRetryTask || !isTaskCompleted(selectedRetryTask) }"
           >
-            <div class="font-medium" :class="selectedRetryTask && isTaskCompleted(selectedRetryTask) ? 'text-blue-400' : 'text-gray-500'">上传至 WebDAV</div>
-            <div class="text-sm text-gray-400 mt-1">
+            <div class="font-medium">上传至 WebDAV</div>
+            <div class="text-sm mt-1">
               {{ selectedRetryTask && isTaskCompleted(selectedRetryTask) ? '将已下载完成的文件上传到 WebDAV 服务器' : '需等待下载/合并完成后才能上传' }}
             </div>
           </button>
@@ -466,7 +554,7 @@ onUnmounted(() => {
 
         <button
           @click="showRetryModal = false"
-          class="w-full mt-4 px-4 py-2 rounded-lg bg-dark-300 hover:bg-dark-400 text-gray-400 hover:text-gray-200 transition-colors"
+          class="retry-modal-cancel"
         >
           取消
         </button>

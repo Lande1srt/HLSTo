@@ -3,6 +3,7 @@ package handler
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -15,12 +16,14 @@ import (
 type SettingsHandler struct {
 	storage          *storage.SQLiteStorage
 	schedulerService *service.SchedulerService
+	downloaderService *service.DownloaderService
 }
 
-func NewSettingsHandler(storage *storage.SQLiteStorage, scheduler *service.SchedulerService) *SettingsHandler {
+func NewSettingsHandler(storage *storage.SQLiteStorage, scheduler *service.SchedulerService, downloader *service.DownloaderService) *SettingsHandler {
 	return &SettingsHandler{
 		storage:          storage,
 		schedulerService: scheduler,
+		downloaderService: downloader,
 	}
 }
 
@@ -139,7 +142,9 @@ func (h *SettingsHandler) ClearCache(w http.ResponseWriter, r *http.Request) {
 		for _, f := range files {
 			if f.IsDir() && strings.HasPrefix(f.Name(), "download_") {
 				err := os.RemoveAll(filepath.Join(dir, f.Name()))
-				if err == nil {
+				if err != nil {
+					log.Printf("[Settings] 删除缓存目录失败: %v\n", err)
+				} else {
 					count++
 				}
 			}
@@ -162,6 +167,16 @@ func (h *SettingsHandler) SaveSettings(w http.ResponseWriter, r *http.Request) {
 	if err := h.storage.SaveSettings(&newSettings); err != nil {
 		h.sendError(w, http.StatusInternalServerError, "保存设置失败")
 		return
+	}
+
+	// 更新下载服务的并发配置
+	if h.downloaderService != nil {
+		h.downloaderService.UpdateConcurrencyConfig(
+			newSettings.DownloadConcurrency,
+			newSettings.MergeConcurrency,
+			newSettings.UploadConcurrency,
+			newSettings.SingleMode,
+		)
 	}
 
 	h.sendSuccess(w, newSettings)

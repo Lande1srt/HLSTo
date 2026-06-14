@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"m3u8-downloader-web/model"
@@ -43,27 +44,63 @@ type taskControl struct {
 	isPaused bool
 }
 
+type semaphore struct {
+	sem chan struct{}
+}
+
 type DownloaderService struct {
 	taskManager *TaskManager
 	wsManager   *websocket.WebSocketManager
 	controls    map[string]*taskControl
 	mu          sync.RWMutex
 
-	// 队列控制信号量
-	downloadSem chan struct{}
-	mergeSem    chan struct{}
-	uploadSem   chan struct{}
+	downloadSem atomic.Pointer[semaphore]
+	mergeSem    atomic.Pointer[semaphore]
+	uploadSem   atomic.Pointer[semaphore]
+	
+	// 配置
+	downloadConcurrency atomic.Int32
+	mergeConcurrency    atomic.Int32
+	uploadConcurrency   atomic.Int32
+	singleMode          atomic.Bool
+	singleSem           chan struct{} // 单状态模式下的全局信号量
 }
 
 func NewDownloaderService(taskManager *TaskManager, wsManager *websocket.WebSocketManager) *DownloaderService {
-	return &DownloaderService{
+	ds := &DownloaderService{
 		taskManager: taskManager,
 		wsManager:   wsManager,
 		controls:    make(map[string]*taskControl),
-		downloadSem: make(chan struct{}, 1),
-		mergeSem:    make(chan struct{}, 1),
-		uploadSem:   make(chan struct{}, 1),
+		singleSem:   make(chan struct{}, 1),
 	}
+	
+	// 初始化原子指针
+	ds.downloadSem.Store(&semaphore{sem: make(chan struct{}, 1)})
+	ds.mergeSem.Store(&semaphore{sem: make(chan struct{}, 1)})
+	ds.uploadSem.Store(&semaphore{sem: make(chan struct{}, 1)})
+	
+	// 初始化配置
+	ds.downloadConcurrency.Store(1)
+	ds.mergeConcurrency.Store(1)
+	ds.uploadConcurrency.Store(1)
+	ds.singleMode.Store(false)
+	
+	return ds
+}
+
+func (ds *DownloaderService) UpdateConcurrencyConfig(download, merge, upload int, singleMode bool) {
+	// 使用原子操作更新配置
+	ds.downloadConcurrency.Store(int32(download))
+	ds.mergeConcurrency.Store(int32(merge))
+	ds.uploadConcurrency.Store(int32(upload))
+	ds.singleMode.Store(singleMode)
+	
+	ds.downloadSem.Store(&semaphore{sem: make(chan struct{}, download)})
+	ds.mergeSem.Store(&semaphore{sem: make(chan struct{}, merge)})
+	ds.uploadSem.Store(&semaphore{sem: make(chan struct{}, upload)})
+	
+	log.Printf("[Downloader] 并发配置已更新: 下载=%d, 合并=%d, 上传=%d, 单模式=%v\n", 
+		download, merge, upload, singleMode)
 }
 
 func (ds *DownloaderService) getControl(taskID string) (*taskControl, bool) {
@@ -130,11 +167,36 @@ func (ds *DownloaderService) download(taskID string, req model.DownloadRequest) 
 	runtime.GOMAXPROCS(runtime.NumCPU())
 
 	ctrl, _ := ds.getControl(taskID)
+	var downloadDir string
+	
+	// 记录任务是否成功完成
+	taskCompleted := false
+	defer func() {
+		if !taskCompleted && downloadDir != "" {
+			// 下载失败，清理缓存目录
+			if err := os.RemoveAll(downloadDir); err != nil {
+				log.Printf("[Cleanup] 清理失败目录时出错: %v\n", err)
+			} else {
+				log.Printf("[Cleanup] 已清理失败任务的缓存目录: %s\n", downloadDir)
+			}
+		}
+	}()
 
-	// --- 阶段 1: 下载 ---
 	ds.sendStatus(taskID, model.StatusPending, "正在等待下载队列...")
+	
+	if ds.singleMode.Load() {
+		select {
+		case ds.singleSem <- struct{}{}:
+			// 获得全局锁
+		case <-ctrl.stopped:
+			return
+		}
+		defer func() { <-ds.singleSem }()
+	}
+	
+	downloadSem := ds.downloadSem.Load()
 	select {
-	case ds.downloadSem <- struct{}{}:
+	case downloadSem.sem <- struct{}{}:
 		// 获得下载权
 	case <-ctrl.stopped:
 		return
@@ -144,7 +206,7 @@ func (ds *DownloaderService) download(taskID string, req model.DownloadRequest) 
 	downloadFinished := false
 	defer func() {
 		if !downloadFinished {
-			<-ds.downloadSem
+			<-downloadSem.sem
 		}
 	}()
 
@@ -163,8 +225,13 @@ func (ds *DownloaderService) download(taskID string, req model.DownloadRequest) 
 	// 过滤文件名中的非法字符
 	req.OutputName = sanitizeFileName(req.OutputName)
 
-	timestamp := time.Now().Format("0601020304")
-	downloadDir := filepath.Join(pwd, fmt.Sprintf("download_%s", timestamp))
+	if req.RetryMode != "" {
+		downloadDir = filepath.Join(pwd, req.OutputName)
+	} else {
+		// 新下载：使用时间戳作为目录名
+		timestamp := time.Now().Format("0601020304")
+		downloadDir = filepath.Join(pwd, fmt.Sprintf("download_%s", timestamp))
+	}
 	cacheDir := filepath.Join(downloadDir, "cache")
 
 	if exists, _ := pathExists(cacheDir); !exists {
@@ -209,13 +276,16 @@ func (ds *DownloaderService) download(taskID string, req model.DownloadRequest) 
 		}
 
 		downloadFinished = true
-		<-ds.downloadSem // 下载阶段结束，释放信号量
+		<-downloadSem.sem
 
 		// --- 阶段 2: 合并 ---
 		ds.sendStatus(taskID, model.StatusMerging, "正在等待合并队列...")
 		ds.sendProgress(taskID, 0, "等待队列", 0, 0)
+		
+		// 获取当前的合并信号量（使用原子指针）
+		mergeSem := ds.mergeSem.Load()
 		select {
-		case ds.mergeSem <- struct{}{}:
+		case mergeSem.sem <- struct{}{}:
 			// 获得合并权
 		case <-ctrl.stopped:
 			return
@@ -225,7 +295,7 @@ func (ds *DownloaderService) download(taskID string, req model.DownloadRequest) 
 		mergeFinished := false
 		defer func() {
 			if !mergeFinished {
-				<-ds.mergeSem
+				<-mergeSem.sem
 			}
 		}()
 
@@ -238,15 +308,20 @@ func (ds *DownloaderService) download(taskID string, req model.DownloadRequest) 
 			return
 		}
 
+		// 合并完成
+		ds.sendStatus(taskID, model.StatusMerging, "合并完成")
+		ds.sendLog(taskID, "info", "合并完成")
+
 		if req.AutoClear {
-			os.RemoveAll(cacheDir)
+			if err := os.RemoveAll(cacheDir); err != nil {
+				log.Printf("[Downloader] 删除缓存目录失败: %v\n", err)
+				ds.sendLog(taskID, "warn", fmt.Sprintf("删除缓存目录失败: %v", err))
+			}
 		}
 
 		mergeFinished = true
-		<-ds.mergeSem // 合并阶段结束，释放信号量
+		<-mergeSem.sem // 合并阶段结束，释放信号量
 	} else {
-		// --- 阶段 1: 直接下载通用文件 ---
-		// 在正式下载前再次校验是否为视频文件
 		if !ds.checkIsVideoURL(req.URL, req.Referer, req.Cookie) {
 			ds.sendLog(taskID, "error", "不支持的下载类型，仅支持主流视频格式")
 			ds.sendStatus(taskID, model.StatusFailed, "不支持的视频格式")
@@ -267,9 +342,8 @@ func (ds *DownloaderService) download(taskID string, req model.DownloadRequest) 
 		if !ds.downloadSingleFile(taskID, req.URL, mv, req.Referer, req.Cookie, ctrl) {
 			return
 		}
-
 		downloadFinished = true
-		<-ds.downloadSem // 下载阶段结束，释放信号量
+		<-downloadSem.sem // 下载阶段结束，释放信号量
 		
 		// 通用文件跳过合并阶段
 		ds.sendLog(taskID, "info", "通用文件下载完成，跳过合并阶段")
@@ -285,13 +359,16 @@ func (ds *DownloaderService) download(taskID string, req model.DownloadRequest) 
 	// --- 阶段 3: 上传 ---
 	if req.EnableWebDAV && req.WebDAVURL != "" {
 		ds.sendStatus(taskID, model.StatusUploading, "正在等待上传队列...")
+		
+		// 获取当前的上传信号量（使用原子指针）
+		uploadSem := ds.uploadSem.Load()
 		select {
-		case ds.uploadSem <- struct{}{}:
+		case uploadSem.sem <- struct{}{}:
 			// 获得上传权
 		case <-ctrl.stopped:
 			return
 		}
-		defer func() { <-ds.uploadSem }()
+		defer func() { <-uploadSem.sem }()
 
 		ds.sendStatus(taskID, model.StatusUploading, "正在上传到 WebDAV...")
 		ds.sendLog(taskID, "info", fmt.Sprintf("开始上传到 WebDAV: %s", req.WebDAVURL))
@@ -347,8 +424,12 @@ func (ds *DownloaderService) download(taskID string, req model.DownloadRequest) 
 			ds.markTaskCompleted(taskID, mv, "下载并上传完成")
 
 			if req.DeleteAfterUpload {
-				os.RemoveAll(downloadDir)
-				ds.sendLog(taskID, "info", "已清理本地下载目录")
+				if err := os.RemoveAll(downloadDir); err != nil {
+					log.Printf("[Downloader] 删除本地下载目录失败: %v\n", err)
+					ds.sendLog(taskID, "warn", fmt.Sprintf("删除本地下载目录失败: %v", err))
+				} else {
+					ds.sendLog(taskID, "info", "已清理本地下载目录")
+				}
 			}
 		}
 	} else {
@@ -356,6 +437,7 @@ func (ds *DownloaderService) download(taskID string, req model.DownloadRequest) 
 		ds.markTaskCompleted(taskID, mv, "下载完成")
 	}
 
+	taskCompleted = true
 	log.Printf("[Success] 下载保存路径：%s\n", mv)
 }
 
@@ -710,6 +792,9 @@ func (ds *DownloaderService) downloader(taskID string, maxGoroutines int, key st
 	var totalBytes int64
 	startTime := time.Now()
 	lastUpdateTime := time.Now()
+
+	// 更新状态为正在下载分片
+	ds.sendStatus(taskID, model.StatusDownloading, "正在下载分片...")
 
 	getMissing := func() []TsInfo {
 		var missing []TsInfo
@@ -1091,6 +1176,7 @@ func (ds *DownloaderService) RetryDownload(taskID string, mode string) error {
 		WebDAVPassword:    task.WebDAVPassword,
 		WebDAVRemoteDir:   task.WebDAVRemoteDir,
 		DeleteAfterUpload: task.DeleteAfterUpload,
+		RetryMode:         retryMode,
 	}
 
 	// 更新任务状态并广播
@@ -1100,6 +1186,18 @@ func (ds *DownloaderService) RetryDownload(taskID string, mode string) error {
 	} else {
 		ds.sendStatus(taskID, model.StatusDownloading, "正在完全重新下载...")
 		ds.sendLog(taskID, "info", "重试模式：完全重新下载所有分片")
+		
+		// 删除之前的缓存文件
+		taskDir := filepath.Join(task.SavePath, task.Name)
+		cacheDir := filepath.Join(taskDir, "cache")
+		if exists, _ := pathExists(cacheDir); exists {
+			if err := os.RemoveAll(cacheDir); err != nil {
+				log.Printf("[Retry] 删除旧缓存目录失败: %v\n", err)
+				ds.sendLog(taskID, "warn", fmt.Sprintf("删除旧缓存目录失败: %v", err))
+			} else {
+				ds.sendLog(taskID, "info", "已删除之前的缓存目录")
+			}
+		}
 	}
 	
 	ds.taskManager.mu.Lock()
@@ -1203,8 +1301,12 @@ func (ds *DownloaderService) UploadTaskToWebDAV(taskID string, config *WebDAVCon
 		if task.DeleteAfterUpload {
 			downloadDir := filepath.Dir(task.OutputPath)
 			if strings.Contains(filepath.Base(downloadDir), "download_") {
-				os.RemoveAll(downloadDir)
-				ds.sendLog(taskID, "info", "已清理本地下载目录")
+				if err := os.RemoveAll(downloadDir); err != nil {
+					log.Printf("[Downloader] 删除本地下载目录失败: %v\n", err)
+					ds.sendLog(taskID, "warn", fmt.Sprintf("删除本地下载目录失败: %v", err))
+				} else {
+					ds.sendLog(taskID, "info", "已清理本地下载目录")
+				}
 			} else {
 				os.Remove(task.OutputPath)
 				ds.sendLog(taskID, "info", "已删除本地文件")

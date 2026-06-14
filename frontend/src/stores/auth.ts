@@ -4,7 +4,8 @@ import api from '@/api'
 
 export const useAuthStore = defineStore('auth', () => {
   const token = ref(localStorage.getItem('token') || '')
-  const authEnabled = ref(true) // 默认开启，等待 checkAuth 确认
+  const authEnabled = ref(false)
+  const authChecked = ref(false)
 
   const isAuthenticated = computed(() => {
     if (!authEnabled.value) return true
@@ -21,6 +22,8 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   const checkAuth = async () => {
+    if (authChecked.value) return
+    
     try {
       const res = await api.get('/auth/check')
       if (res.data.code === 200) {
@@ -29,8 +32,11 @@ export const useAuthStore = defineStore('auth', () => {
           setToken('')
         }
       }
+      authChecked.value = true
     } catch (err) {
       console.error('Check auth failed:', err)
+      authEnabled.value = false
+      authChecked.value = true
     }
   }
 

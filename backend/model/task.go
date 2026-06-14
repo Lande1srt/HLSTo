@@ -50,20 +50,21 @@ type Task struct {
 }
 
 type DownloadRequest struct {
-	URL             string `json:"url"`
-	ThreadCount     int    `json:"threadCount"`
-	OutputName      string `json:"outputName"`
-	HostType        string `json:"hostType"` 
-	Cookie          string `json:"cookie"` 
-	Referer         string `json:"referer"` 
-	AutoClear       bool   `json:"autoClear"`
-	SavePath        string `json:"savePath"`
-	EnableWebDAV    bool   `json:"enableWebDAV"`
-	WebDAVURL       string `json:"webDAVURL"`
-	WebDAVUsername  string `json:"webDAVUsername"`
-	WebDAVPassword  string `json:"webDAVPassword"`
-	WebDAVRemoteDir string `json:"webDAVRemoteDir"`
-	DeleteAfterUpload bool `json:"deleteAfterUpload"`
+	URL             string     `json:"url"`
+	ThreadCount     int        `json:"threadCount"`
+	OutputName      string     `json:"outputName"`
+	HostType        string     `json:"hostType"` 
+	Cookie          string     `json:"cookie"` 
+	Referer         string     `json:"referer"` 
+	AutoClear       bool       `json:"autoClear"`
+	SavePath        string     `json:"savePath"`
+	EnableWebDAV    bool       `json:"enableWebDAV"`
+	WebDAVURL       string     `json:"webDAVURL"`
+	WebDAVUsername  string     `json:"webDAVUsername"`
+	WebDAVPassword  string     `json:"webDAVPassword"`
+	WebDAVRemoteDir string     `json:"webDAVRemoteDir"`
+	DeleteAfterUpload bool     `json:"deleteAfterUpload"`
+	RetryMode       RetryMode  `json:"retryMode"`
 }
 
 type APIResponse struct {
@@ -86,6 +87,19 @@ type Settings struct {
 	DeleteAfterUpload  bool   `json:"deleteAfterUpload"` 
 	TaskSortOrder      string `json:"taskSortOrder"` // "desc" or "asc"
 	DefaultReferer     string `json:"defaultReferer"` 
+	
+	// 队列控制配置
+	DownloadConcurrency int  `json:"downloadConcurrency"` // 同时下载数量
+	MergeConcurrency    int  `json:"mergeConcurrency"`    // 同时合并数量
+	UploadConcurrency   int  `json:"uploadConcurrency"`   // 同时上传数量
+	SingleMode          bool `json:"singleMode"`          // 单状态处理模式
+	
+	// 预下载检查配置
+	EnablePreDownloadCheck bool `json:"enablePreDownloadCheck"` // 是否启用预下载检查
+	MinFreeSpaceMB         int  `json:"minFreeSpaceMB"`         // 最小可用空间(MB)
+	
+	// 磁盘刷新配置
+	DiskRefreshInterval int `json:"diskRefreshInterval"` // 磁盘信息自动刷新间隔(秒)，默认10秒，最大3600秒
 }
 
 type WebSocketMessage struct {

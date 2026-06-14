@@ -1,0 +1,389 @@
+/* 深色模式样式 */
+
+/* 深色模式背景和文字颜色 */
+.dark body {
+  background: #1a1a2e;
+  color: #e0e0e0;
+}
+
+/* 深色模式卡片 */
+.dark .card {
+  background-color: #1a1a2e;
+  border-color: #121220;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+}
+
+/* 深色模式输入框 */
+.dark .input-field {
+  background-color: #16162a;
+  border-color: #121220;
+  color: #e0e0e0;
+}
+
+.dark .input-field::placeholder {
+  color: #6b7280;
+}
+
+.dark .input-field:focus {
+  outline: none;
+  border-color: #3498db;
+  box-shadow: 0 0 0 3px rgba(52, 152, 219, 0.2);
+}
+
+/* 深色模式按钮 */
+.dark .btn-secondary {
+  background-color: #121220;
+  color: #e0e0e0;
+}
+
+.dark .btn-secondary:hover {
+  background-color: #0d0d18;
+}
+
+/* 深色模式导航栏 */
+.dark nav {
+  background-color: #1a1a2e;
+  border-color: #121220;
+}
+
+.dark nav h1 {
+  color: #e0e0e0;
+}
+
+.dark nav a {
+  color: #9ca3af;
+}
+
+.dark nav a:hover {
+  color: #3498db;
+}
+
+/* 深色模式标签 */
+.dark .tag {
+  background-color: #121220;
+  color: #e0e0e0;
+}
+
+/* 深色模式进度条 */
+.dark .progress-bar {
+  background-color: #121220;
+}
+
+/* 深色模式表格和列表 */
+.dark .border-gray-300 {
+  border-color: #121220;
+}
+
+.dark .bg-gray-100 {
+  background-color: #16162a;
+}
+
+.dark .bg-gray-200 {
+  background-color: #121220;
+}
+
+/* 深色模式文字颜色 */
+.dark .text-gray-800 {
+  color: #e0e0e0;
+}
+
+.dark .text-gray-700 {
+  color: #d1d5db;
+}
+
+.dark .text-gray-600 {
+  color: #9ca3af;
+}
+
+.dark .text-gray-500 {
+  color: #6b7280;
+}
+
+.dark .text-gray-400 {
+  color: #4b5563;
+}
+
+/* 深色模式状态标签颜色 */
+.dark .text-yellow-600 {
+  color: #facc15;
+}
+
+.dark .text-green-600 {
+  color: #4ade80;
+}
+
+.dark .text-red-600 {
+  color: #f87171;
+}
+
+.dark .text-blue-600 {
+  color: #60a5fa;
+}
+
+.dark .text-purple-600 {
+  color: #a78bfa;
+}
+
+/* 深色模式背景颜色 */
+.dark .bg-yellow-100 {
+  background-color: rgba(250, 204, 21, 0.1);
+}
+
+.dark .bg-green-100 {
+  background-color: rgba(74, 222, 128, 0.1);
+}
+
+.dark .bg-red-100 {
+  background-color: rgba(248, 113, 113, 0.1);
+}
+
+.dark .bg-blue-100 {
+  background-color: rgba(96, 165, 250, 0.1);
+}
+
+.dark .bg-purple-100 {
+  background-color: rgba(167, 139, 250, 0.1);
+}
+
+/* 深色模式边框颜色 */
+.dark .border-yellow-300 {
+  border-color: #a16207;
+}
+
+.dark .border-green-300 {
+  border-color: #166534;
+}
+
+.dark .border-red-300 {
+  border-color: #991b1b;
+}
+
+.dark .border-blue-300 {
+  border-color: #1d4ed8;
+}
+
+.dark .border-purple-300 {
+  border-color: #6b21a8;
+}
+
+/* 深色模式模态框 */
+.dark .modal-overlay {
+  background-color: rgba(0, 0, 0, 0.7);
+}
+
+.dark .modal-content {
+  background-color: #1a1a2e;
+  border-color: #121220;
+}
+
+/* 深色模式日志区域 */
+.dark .log-area {
+  background-color: #16162a;
+}
+
+/* 深色模式复选框 */
+.dark input[type="checkbox"] {
+  background-color: #16162a;
+  border-color: #121220;
+}
+
+/* 深色模式选择框 */
+.dark select {
+  background-color: #16162a;
+  border-color: #121220;
+  color: #e0e0e0;
+}
+
+/* 深色模式开关 */
+.dark .toggle-switch {
+  background-color: #121220;
+}
+
+/* 深色模式链接 */
+.dark a {
+  color: #3498db;
+}
+
+/* 深色模式按钮文字 */
+.dark .btn-secondary.text-red-500 {
+  color: #f87171;
+}
+
+/* 重试模态框基础样式 */
+.retry-modal-content {
+  background-color: #ffffff;
+  border: 1px solid #e5e7eb;
+  border-radius: 0.5rem;
+  padding: 1.5rem;
+  max-width: 28rem;
+  width: 90%;
+  margin: 1rem;
+  box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+}
+
+.retry-modal-btn {
+  width: 100%;
+  text-align: left;
+  padding: 1rem;
+  border-radius: 0.5rem;
+  background-color: #f3f4f6;
+  border: 1px solid #d1d5db;
+  color: #1f2937;
+  transition: all 0.2s ease;
+}
+
+.retry-modal-btn:hover:not(.disabled) {
+  background-color: #e5e7eb;
+  border-color: rgba(52, 152, 219, 0.5);
+}
+
+.retry-modal-btn .text-sm {
+  color: #6b7280;
+}
+
+.retry-modal-btn.force-merge .font-medium {
+  color: #d97706;
+}
+
+.retry-modal-btn.upload-btn:not(.disabled) .font-medium {
+  color: #2563eb;
+}
+
+.retry-modal-btn.disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.retry-modal-btn.disabled .font-medium {
+  color: #9ca3af;
+}
+
+.retry-modal-cancel {
+  width: 100%;
+  margin-top: 1rem;
+  padding: 0.5rem 1rem;
+  border-radius: 0.5rem;
+  background-color: #e5e7eb;
+  color: #4b5563;
+  transition: all 0.2s ease;
+}
+
+.retry-modal-cancel:hover {
+  background-color: #d1d5db;
+  color: #1f2937;
+}
+
+/* 深色模式重试模态框 */
+.dark .retry-modal-content {
+  background-color: #1a1a2e;
+  border-color: #121220;
+  color: #e0e0e0;
+}
+
+.dark .retry-modal-btn {
+  background-color: #16162a;
+  border-color: #121220;
+  color: #e0e0e0;
+}
+
+.dark .retry-modal-btn:hover:not(.disabled) {
+  background-color: #121220;
+  border-color: #3498db;
+}
+
+.dark .retry-modal-btn .text-sm {
+  color: #6b7280;
+}
+
+.dark .retry-modal-btn.force-merge .font-medium {
+  color: #facc15;
+}
+
+.dark .retry-modal-btn.upload-btn:not(.disabled) .font-medium {
+  color: #60a5fa;
+}
+
+.dark .retry-modal-btn.disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.dark .retry-modal-btn.disabled .font-medium {
+  color: #4b5563;
+}
+
+.dark .retry-modal-cancel {
+  background-color: #121220;
+  color: #9ca3af;
+}
+
+.dark .retry-modal-cancel:hover {
+  background-color: #0d0d18;
+  color: #e0e0e0;
+}
+
+/* 更多参数区域基础样式 */
+.more-params-container {
+  border: 1px solid #e5e7eb;
+  border-radius: 0.5rem;
+  overflow: hidden;
+}
+
+.more-params-header {
+  width: 100%;
+  padding: 0.75rem 1rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background-color: #f3f4f6;
+  transition: all 0.2s ease;
+  text-align: left;
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: #374151;
+}
+
+.more-params-header:hover {
+  background-color: #e5e7eb;
+}
+
+.more-params-header .text-xs {
+  color: #6b7280;
+}
+
+.more-params-content {
+  padding: 1rem;
+  background-color: #ffffff;
+  border-top: 1px solid #e5e7eb;
+}
+
+.more-params-content .text-sm {
+  color: #4b5563;
+}
+
+/* 更多参数区域深色模式样式 */
+.dark .more-params-container {
+  border-color: #121220;
+}
+
+.dark .more-params-header {
+  background-color: #16162a;
+  color: #e0e0e0;
+}
+
+.dark .more-params-header:hover {
+  background-color: #121220;
+}
+
+.dark .more-params-header .text-xs {
+  color: #6b7280;
+}
+
+.dark .more-params-content {
+  background-color: #1a1a2e;
+  border-top-color: #121220;
+}
+
+.dark .more-params-content .text-sm {
+  color: #9ca3af;
+}

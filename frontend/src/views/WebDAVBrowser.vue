@@ -65,16 +65,16 @@ onMounted(() => {
 </script>
 
 <template>
-  <div v-if="show" class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm">
-    <div class="w-full max-w-lg bg-dark-200 border border-white/10 rounded-xl shadow-2xl overflow-hidden flex flex-col max-h-[80vh]">
-      <div class="px-6 py-4 border-b border-white/10 flex items-center justify-between">
-        <h3 class="text-lg font-bold text-white">选择远程目录</h3>
-        <button @click="emit('close')" class="text-gray-400 hover:text-white transition-colors">
+  <div v-if="show" class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50">
+    <div class="w-full max-w-lg bg-white rounded-lg shadow-lg overflow-hidden flex flex-col max-h-[80vh]">
+      <div class="px-6 py-4 border-b border-gray-300 flex items-center justify-between">
+        <h3 class="text-lg font-bold text-gray-800">选择远程目录</h3>
+        <button @click="emit('close')" class="text-gray-500 hover:text-gray-700 transition-colors">
           <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
         </button>
       </div>
 
-      <div class="px-6 py-3 bg-dark-300 border-b border-white/10 flex items-center gap-2 overflow-x-auto">
+      <div class="px-6 py-3 bg-gray-100 border-b border-gray-300 flex items-center gap-2 overflow-x-auto">
         <button @click="navigateTo('/')" class="text-primary hover:underline text-sm font-medium whitespace-nowrap">根目录</button>
         <template v-for="(part, i) in currentPath.split('/').filter(Boolean)" :key="i">
           <span class="text-gray-500">/</span>
@@ -88,13 +88,13 @@ onMounted(() => {
       </div>
 
       <div class="flex-1 overflow-y-auto p-2">
-        <div v-if="loading" class="flex flex-col items-center justify-center py-12 text-gray-400">
+        <div v-if="loading" class="flex flex-col items-center justify-center py-12 text-gray-500">
           <div class="w-8 h-8 border-2 border-primary border-t-transparent rounded-full animate-spin mb-4"></div>
           <p>正在读取目录...</p>
         </div>
 
         <div v-else-if="error" class="p-4 text-center">
-          <p class="text-red-400 mb-4">{{ error }}</p>
+          <p class="text-red-500 mb-4">{{ error }}</p>
           <button @click="fetchDirs(currentPath)" class="btn-secondary py-1 px-4">重试</button>
         </div>
 
@@ -102,7 +102,7 @@ onMounted(() => {
           <button 
             v-if="currentPath !== '/'"
             @click="goBack"
-            class="w-full flex items-center gap-3 px-4 py-2 hover:bg-white/5 rounded-lg text-gray-300 transition-colors text-left"
+            class="w-full flex items-center gap-3 px-4 py-2 hover:bg-gray-100 rounded-lg text-gray-700 transition-colors text-left"
           >
             <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-gray-500"><path d="m15 18-6-6 6-6"/></svg>
             <span>返回上级目录</span>
@@ -112,7 +112,7 @@ onMounted(() => {
             v-for="file in files" 
             :key="file.path"
             @click="navigateTo(file.path)"
-            class="w-full flex items-center gap-3 px-4 py-2 hover:bg-white/5 rounded-lg text-gray-300 transition-colors text-left"
+            class="w-full flex items-center gap-3 px-4 py-2 hover:bg-gray-100 rounded-lg text-gray-700 transition-colors text-left"
           >
             <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-primary"><path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>
             <span>{{ file.name }}</span>
@@ -124,10 +124,10 @@ onMounted(() => {
         </div>
       </div>
 
-      <div class="p-6 border-t border-white/10 flex items-center justify-between gap-4">
+      <div class="p-6 border-t border-gray-300 flex items-center justify-between gap-4">
         <div class="flex-1 min-w-0">
           <p class="text-xs text-gray-500 uppercase font-bold tracking-wider mb-1">当前选择</p>
-          <p class="text-sm text-white truncate font-mono">{{ currentPath }}</p>
+          <p class="text-sm text-gray-800 truncate font-mono">{{ currentPath }}</p>
         </div>
         <div class="flex gap-3">
           <button @click="emit('close')" class="btn-secondary py-2">取消</button>

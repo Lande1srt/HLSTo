@@ -9,7 +9,6 @@ const api = axios.create({
   }
 })
 
-// 添加请求拦截器，注入 Token
 api.interceptors.request.use((config) => {
   const token = localStorage.getItem('token')
   if (token) {
@@ -18,7 +17,6 @@ api.interceptors.request.use((config) => {
   return config
 })
 
-// 添加响应拦截器，处理 401
 api.interceptors.response.use(
   (response) => response,
   (error) => {
@@ -82,6 +80,12 @@ export const settingsAPI = {
 
   saveCleanupConfig: (config: { enabled: boolean; interval: number; unit: string }) =>
     api.post('/settings/cleanup-config', config)
+}
+
+export const diskAPI = {
+  getInfo: () => api.get('/disk/info'),
+  getAllDisks: () => api.get('/disk/all'),
+  checkSpace: (path?: string) => api.post('/disk/check-space', { path })
 }
 
 export default api

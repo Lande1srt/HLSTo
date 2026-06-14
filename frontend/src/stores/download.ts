@@ -83,9 +83,9 @@ export const useDownloadStore = defineStore('download', () => {
               currentTask.value.status = data.status
               if (data.message) {
                 addLog('info', data.message)
-                currentTask.value.error = data.message // 实时更新消息内容
+                currentTask.value.error = data.message
               } else {
-                currentTask.value.error = '' // 如果没有消息，清空之前的错误
+                currentTask.value.error = ''
               }
               if (data.status === 'completed' || data.status === 'failed') {
                 isDownloading.value = false
@@ -191,7 +191,6 @@ export const useDownloadStore = defineStore('download', () => {
       const response = await downloadAPI.retry(taskId, mode)
       if (response.data.code === 200) {
         addLog('info', '重试成功，开始下载')
-        // 如果是当前正在查看的任务，需要重新连接 WS
         if (currentTask.value?.id === taskId) {
           isDownloading.value = true
           connectWebSocket(taskId)
@@ -246,7 +245,6 @@ export const useDownloadStore = defineStore('download', () => {
     try {
       await downloadAPI.stop(taskId)
       
-      // 如果是当前正在查看的任务
       if (currentTask.value?.id === taskId) {
         if (ws.value) {
           ws.value.close()

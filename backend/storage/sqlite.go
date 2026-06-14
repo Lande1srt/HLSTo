@@ -167,8 +167,15 @@ func migrateTasksTable(db *sql.DB) {
 
 func migrateSettingsTable(db *sql.DB) {
 	columns := map[string]string{
-		"task_sort_order": "TEXT DEFAULT 'desc'",
-		"default_referer": "TEXT DEFAULT ''",
+		"task_sort_order":           "TEXT DEFAULT 'desc'",
+		"default_referer":           "TEXT DEFAULT ''",
+		"download_concurrency":      "INTEGER DEFAULT 1",
+		"merge_concurrency":         "INTEGER DEFAULT 1",
+		"upload_concurrency":        "INTEGER DEFAULT 1",
+		"single_mode":               "BOOLEAN DEFAULT 0",
+		"enable_pre_download_check": "BOOLEAN DEFAULT 1",
+		"min_free_space_mb":         "INTEGER DEFAULT 500",
+		"disk_refresh_interval":     "INTEGER DEFAULT 10",
 	}
 
 	for col, colType := range columns {
@@ -187,11 +194,22 @@ func (s *SQLiteStorage) GetSettings() (*model.Settings, error) {
 		default_thread_count, default_output_name, default_save_path,
 		auto_clear, host_type, enable_webdav, webdav_url,
 		webdav_username, webdav_password, webdav_remote_dir,
-		delete_after_upload, task_sort_order, default_referer
+		delete_after_upload, task_sort_order, default_referer,
+		download_concurrency, merge_concurrency, upload_concurrency, single_mode,
+		enable_pre_download_check, min_free_space_mb, disk_refresh_interval
 	FROM settings WHERE id = 1
 	`
 
-	settings := &model.Settings{}
+	settings := &model.Settings{
+		// 默认值
+		DownloadConcurrency:     1,
+		MergeConcurrency:        1,
+		UploadConcurrency:       1,
+		SingleMode:              false,
+		EnablePreDownloadCheck:  true,
+		MinFreeSpaceMB:          500,
+		DiskRefreshInterval:     10,
+	}
 	err := s.db.QueryRow(query).Scan(
 		&settings.DefaultThreadCount,
 		&settings.DefaultOutputName,
@@ -206,6 +224,13 @@ func (s *SQLiteStorage) GetSettings() (*model.Settings, error) {
 		&settings.DeleteAfterUpload,
 		&settings.TaskSortOrder,
 		&settings.DefaultReferer,
+		&settings.DownloadConcurrency,
+		&settings.MergeConcurrency,
+		&settings.UploadConcurrency,
+		&settings.SingleMode,
+		&settings.EnablePreDownloadCheck,
+		&settings.MinFreeSpaceMB,
+		&settings.DiskRefreshInterval,
 	)
 
 	if err == sql.ErrNoRows {
@@ -230,7 +255,14 @@ func (s *SQLiteStorage) SaveSettings(settings *model.Settings) error {
 		webdav_remote_dir = ?,
 		delete_after_upload = ?,
 		task_sort_order = ?,
-		default_referer = ?
+		default_referer = ?,
+		download_concurrency = ?,
+		merge_concurrency = ?,
+		upload_concurrency = ?,
+		single_mode = ?,
+		enable_pre_download_check = ?,
+		min_free_space_mb = ?,
+		disk_refresh_interval = ?
 	WHERE id = 1
 	`
 
@@ -249,6 +281,13 @@ func (s *SQLiteStorage) SaveSettings(settings *model.Settings) error {
 		settings.DeleteAfterUpload,
 		settings.TaskSortOrder,
 		settings.DefaultReferer,
+		settings.DownloadConcurrency,
+		settings.MergeConcurrency,
+		settings.UploadConcurrency,
+		settings.SingleMode,
+		settings.EnablePreDownloadCheck,
+		settings.MinFreeSpaceMB,
+		settings.DiskRefreshInterval,
 	)
 
 	return err
