@@ -10,7 +10,7 @@
 
 本工具仅提供基于学术研究的相关下载功能，如由使用者产生相关法律问题与此工具及相关开发者无关。
 
-![HLSTo Demo](https://r.i2.lc/gitcp/HLSTo/demo.jpeg)
+![HLSTo Demo](https://r.i2.lc/gitcp/HLSTo/hlsto0.2.png)
 ## 下载流程
 
 关于m3u8地址可以通过某些下载器或浏览器扩展抓取（常用）。
