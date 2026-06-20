@@ -1,10 +1,11 @@
 # Wails Build Script for Windows
+# 此脚本用于构建 HLSTo Windows 桌面应用
 
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host "HLSTo Windows Build Script" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 
-# Check Wails CLI
+# 检查 Wails CLI
 Write-Host "`nChecking Wails CLI..." -ForegroundColor Yellow
 $wailsVersion = wails version 2>$null
 if ($LASTEXITCODE -ne 0) {
@@ -15,7 +16,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Host "Wails version: $wailsVersion" -ForegroundColor Green
 
-# Check frontend dependencies
+# 检查前端依赖
 Write-Host "`nChecking frontend dependencies..." -ForegroundColor Yellow
 if (-not (Test-Path "../frontend/node_modules")) {
     Write-Host "Installing frontend dependencies..." -ForegroundColor Yellow
@@ -24,7 +25,7 @@ if (-not (Test-Path "../frontend/node_modules")) {
     cd ../winui
 }
 
-# Build frontend
+# 构建前端应用
 Write-Host "`nBuilding frontend..." -ForegroundColor Yellow
 cd ../frontend
 npm run build
@@ -34,18 +35,18 @@ if ($LASTEXITCODE -ne 0) {
 }
 cd ../winui
 
-# Copy static files
+# 复制静态文件
 Write-Host "`nCopying static files..." -ForegroundColor Yellow
 if (Test-Path "static") { Remove-Item -Recurse -Force static }
 Copy-Item -Path "../backend/static" -Destination "static" -Recurse -Container
 
-# Copy application icon
+# 复制应用图标
 Write-Host "`nCopying application icon..." -ForegroundColor Yellow
 if (-not (Test-Path "build/windows")) { New-Item -ItemType Directory -Path "build/windows" -Force | Out-Null }
 Copy-Item -Path "hlsto.ico" -Destination "build/windows/icon.ico" -Force
 Write-Host "Icon applied: hlsto.ico -> build/windows/icon.ico" -ForegroundColor Green
 
-# Build application
+# 构建应用，应用平台为 Windows/amd64
 Write-Host "`nBuilding Windows application..." -ForegroundColor Yellow
 wails build -platform windows/amd64
 $buildExitCode = $LASTEXITCODE
