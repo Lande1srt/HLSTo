@@ -54,3 +54,4 @@ hlsto-linux
 backend/hlsto
 cleanup_config.json
 backend/cleanup_config.json
+/winui/static

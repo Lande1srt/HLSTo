@@ -1,0 +1,18 @@
+# Wails 构建输出
+build/bin/
+build/windows-*/
+dist/
+
+# Go 缓存
+vendor/
+
+# IDE
+.vscode/
+.idea/
+
+# 临时文件
+*.tmp
+*.log
+
+# Node 缓存
+node_modules/

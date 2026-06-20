@@ -12,15 +12,11 @@
     "noEmit": true,
     "jsx": "preserve",
     "strict": true,
-    "noUnusedLocals": true,
-    "noUnusedParameters": true,
-    "noFallthroughCasesInSwitch": true,
-    "baseUrl": ".",
-    "paths": {
-      "@/*": ["./src/*"]
-    }
+    "noUnusedLocals": false,
+    "noUnusedParameters": false,
+    "noFallthroughCasesInSwitch": true
   },
-  "include": ["src/**/*.ts", "src/**/*.tsx", "src/**/*.vue"],
-  "exclude": ["src/wailsjs"],
+  "include": ["../frontend/src/**/*.ts", "../frontend/src/**/*.tsx", "../frontend/src/**/*.vue"],
+  "exclude": ["../frontend/src/wailsjs"],
   "references": [{ "path": "./tsconfig.node.json" }]
 }

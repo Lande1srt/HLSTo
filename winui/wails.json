@@ -1,0 +1,23 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "HLSTo",
+  "outputfilename": "HLSTo",
+  "frontend:install": "",
+  "frontend:build": "",
+  "frontend:dev:watcher": "",
+  "frontend:dev:url": "",
+  "author": {
+    "name": "HLSTo",
+    "email": "lande@vlsea.cn"
+  },
+  "info": {
+    "companyName": "HLSTo",
+    "productName": "HLSTo - M3U8 Downloader",
+    "productVersion": "0.2.1",
+    "copyright": "Copyright 2026 Coldsea Team",
+    "comments": "A modern M3U8 video downloader desktop application"
+  },
+  "wailsjsdir": "../frontend/src",
+  "version": "2",
+  "outputType": "desktop"
+}
