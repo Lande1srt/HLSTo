@@ -113,7 +113,7 @@ onMounted(() => {
         </form>
 
         <div class="copyright">
-          <p>© {{ new Date().getFullYear() }} HLSTo. All rights reserved.</p>
+          <p>© {{ new Date().getFullYear() }} Coldsea Team. All rights reserved.</p>
         </div>
       </div>
     </div>
