@@ -9,6 +9,7 @@ require (
 	github.com/gorilla/websocket v1.5.1
 	github.com/joho/godotenv v1.5.1
 	github.com/studio-b12/gowebdav v0.12.0
+	github.com/ulikunitz/xz v0.5.12
 	github.com/yapingcat/gomedia v0.0.0-20240906162731-17feea57090c
 	modernc.org/sqlite v1.26.0
 )

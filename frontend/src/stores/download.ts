@@ -12,6 +12,7 @@ export interface Task {
   totalSegments: number
   downloadedSegments: number
   outputPath?: string
+  keyPath?: string
   error?: string
   referer?: string
   createdAt: string

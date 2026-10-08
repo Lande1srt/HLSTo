@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"m3u8-downloader-web/handler"
 	"m3u8-downloader-web/service"
@@ -54,23 +55,74 @@ func main() {
 	}
 
 	taskManager := service.NewTaskManager(dbStorage)
+	defer taskManager.Close()
+
 	wsManager := websocket.NewWebSocketManager()
 	downloaderService := service.NewDownloaderService(taskManager, wsManager)
-	schedulerService := service.NewSchedulerService(dbStorage)
+
+	// FFmpeg 环境服务：检测系统/PATH/私有目录，并支持私有下载安装
+	ffmpegService := service.NewFFmpegService()
+	downloaderService.SetFFmpegService(ffmpegService)
+
+	schedulerService := service.NewSchedulerService(dbStorage, taskManager)
 	schedulerService.Start()
+
+	// 启动时将数据库中已持久化的并发与封装配置应用到下载服务
+	// （服务内存默认值可能与用户之前保存的配置不一致）
+	if persisted, err := dbStorage.GetSettings(); err != nil {
+		log.Printf("[Main] 启动加载设置失败: %v\n", err)
+	} else if persisted != nil {
+		downloaderService.UpdateConcurrencyConfig(
+			persisted.DownloadConcurrency,
+			persisted.MergeConcurrency,
+			persisted.UploadConcurrency,
+			persisted.SingleMode,
+		)
+		downloaderService.UpdatePostDownloadConfig(
+			persisted.MergeAfterDownload,
+			persisted.MergeMethod,
+			persisted.FFmpegMuxMode,
+		)
+		downloaderService.UpdateHLSPackConfig(
+			persisted.HLSPackEnabled,
+			persisted.HLSEncryptEnabled,
+			persisted.HLSEncryptMode,
+			persisted.HLSKeyURL,
+			persisted.HLSPackForm,
+		)
+		downloaderService.UpdateCompressConfig(
+			persisted.CompressAfterMerge,
+			persisted.CompressBitrateThreshold,
+			persisted.CompressTargetBitrate,
+		)
+	}
 
 	taskHandler := handler.NewTaskHandler(taskManager, downloaderService)
 	downloadHandler := handler.NewDownloadHandler(downloaderService, taskManager)
-	settingsHandler := handler.NewSettingsHandler(dbStorage, schedulerService, downloaderService)
+	speedTestService := service.NewSpeedTestService()
+	settingsHandler := handler.NewSettingsHandler(dbStorage, schedulerService, downloaderService, ffmpegService, speedTestService)
 	authHandler := handler.NewAuthHandler()
 	diskHandler := handler.NewDiskHandler()
 	wsHandler := websocket.NewWebSocketHandler(wsManager)
+	apiKeyHandler := handler.NewAPIKeyHandler(dbStorage)
+	ffmpegHandler := handler.NewFFmpegHandler(ffmpegService)
+	remoteHandler := handler.NewRemoteHandler(dbStorage, taskManager, downloaderService, schedulerService, speedTestService)
 
 	router := mux.NewRouter()
 
 	router.Use(corsMiddleware)
 
 	api := router.PathPrefix("/api").Subrouter()
+
+	// 免鉴权健康检查：用于在云端直接判断 Go 进程是否存活/可响应，
+	// 与反向代理、API Key 等环节解耦。curl http(s)://<host>/api/health
+	api.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		handler.OK(w, map[string]interface{}{
+			"status": "ok",
+			"time":   time.Now().UTC().Format(time.RFC3339),
+		})
+	}).Methods("GET")
 
 	api.HandleFunc("/auth/login", authHandler.Login).Methods("POST")
 	api.HandleFunc("/auth/check", authHandler.CheckAuth).Methods("GET")
@@ -87,6 +139,9 @@ func main() {
 	protectedAPI.HandleFunc("/tasks", taskHandler.ListTasks).Methods("GET")
 	protectedAPI.HandleFunc("/tasks/{id}", taskHandler.GetTask).Methods("GET")
 	protectedAPI.HandleFunc("/tasks/{id}", taskHandler.DeleteTask).Methods("DELETE")
+	protectedAPI.HandleFunc("/tasks/{id}/key", taskHandler.DownloadKey).Methods("GET")
+	protectedAPI.HandleFunc("/tasks/{id}/logs", taskHandler.GetLogs).Methods("GET")
+	protectedAPI.HandleFunc("/tasks/{id}/logs/download", taskHandler.DownloadLogs).Methods("GET")
 	protectedAPI.HandleFunc("/settings", settingsHandler.GetSettings).Methods("GET")
 	protectedAPI.HandleFunc("/settings", settingsHandler.SaveSettings).Methods("POST")
 	protectedAPI.HandleFunc("/settings/webdav/test", settingsHandler.TestWebDAV).Methods("POST")
@@ -94,6 +149,50 @@ func main() {
 	protectedAPI.HandleFunc("/settings/clear-cache", settingsHandler.ClearCache).Methods("POST")
 	protectedAPI.HandleFunc("/settings/cleanup-config", settingsHandler.GetCleanupConfig).Methods("GET")
 	protectedAPI.HandleFunc("/settings/cleanup-config", settingsHandler.UpdateCleanupConfig).Methods("POST")
+	protectedAPI.HandleFunc("/settings/speedtest", settingsHandler.GetSpeedTestLog).Methods("GET")
+	protectedAPI.HandleFunc("/settings/speedtest/start", settingsHandler.StartSpeedTest).Methods("POST")
+	protectedAPI.HandleFunc("/settings/speedtest/stop", settingsHandler.StopSpeedTest).Methods("POST")
+	protectedAPI.HandleFunc("/ffmpeg/status", ffmpegHandler.Status).Methods("GET")
+	protectedAPI.HandleFunc("/ffmpeg/install", ffmpegHandler.Install).Methods("POST")
+
+	apiKeyAPI := api.PathPrefix("/apikey").Subrouter()
+	apiKeyAPI.Use(handler.AuthMiddleware)
+	apiKeyAPI.HandleFunc("/generate", apiKeyHandler.GenerateKey).Methods("POST")
+	apiKeyAPI.HandleFunc("/list", apiKeyHandler.ListKeys).Methods("POST")
+	apiKeyAPI.HandleFunc("/revoke", apiKeyHandler.RevokeKey).Methods("POST")
+	apiKeyAPI.HandleFunc("/delete", apiKeyHandler.DeleteKey).Methods("POST")
+
+	remoteAPI := api.PathPrefix("/remote").Subrouter()
+	remoteAPI.Use(handler.APIKeyMiddleware(dbStorage, ""))
+	remoteAPI.HandleFunc("/tasks", remoteHandler.ListTasks).Methods("GET")
+	remoteAPI.HandleFunc("/tasks/{id}", remoteHandler.GetTask).Methods("GET")
+	remoteAPI.HandleFunc("/tasks/{id}", remoteHandler.DeleteTask).Methods("DELETE")
+	remoteAPI.HandleFunc("/tasks/{id}/key", taskHandler.DownloadKey).Methods("GET")
+	remoteAPI.HandleFunc("/tasks/{id}/logs", taskHandler.GetLogs).Methods("GET")
+	remoteAPI.HandleFunc("/tasks/{id}/logs/download", taskHandler.DownloadLogs).Methods("GET")
+	remoteAPI.HandleFunc("/download/start", remoteHandler.StartDownload).Methods("POST")
+	remoteAPI.HandleFunc("/download/stop", remoteHandler.StopDownload).Methods("POST")
+	remoteAPI.HandleFunc("/download/pause", remoteHandler.PauseDownload).Methods("POST")
+	remoteAPI.HandleFunc("/download/resume", remoteHandler.ResumeDownload).Methods("POST")
+	remoteAPI.HandleFunc("/download/retry", remoteHandler.RetryDownload).Methods("POST")
+	remoteAPI.HandleFunc("/download/upload", remoteHandler.UploadToWebDAV).Methods("POST")
+	remoteAPI.HandleFunc("/download/analyze", remoteHandler.AnalyzeM3U8).Methods("POST")
+	remoteAPI.HandleFunc("/settings", remoteHandler.GetSettings).Methods("GET")
+	remoteAPI.HandleFunc("/settings", remoteHandler.SaveSettings).Methods("POST")
+	remoteAPI.HandleFunc("/settings/webdav/test", remoteHandler.TestWebDAV).Methods("POST")
+	remoteAPI.HandleFunc("/settings/webdav/list", remoteHandler.ListWebDAVDir).Methods("POST")
+	remoteAPI.HandleFunc("/settings/clear-cache", remoteHandler.ClearCache).Methods("POST")
+	remoteAPI.HandleFunc("/settings/cleanup-config", remoteHandler.GetCleanupConfig).Methods("GET")
+	remoteAPI.HandleFunc("/settings/cleanup-config", remoteHandler.UpdateCleanupConfig).Methods("POST")
+	remoteAPI.HandleFunc("/settings/speedtest", remoteHandler.GetSpeedTestLog).Methods("GET")
+	remoteAPI.HandleFunc("/settings/speedtest/start", remoteHandler.StartSpeedTest).Methods("POST")
+	remoteAPI.HandleFunc("/settings/speedtest/stop", remoteHandler.StopSpeedTest).Methods("POST")
+	remoteAPI.HandleFunc("/disk/info", remoteHandler.GetDiskInfo).Methods("GET")
+	remoteAPI.HandleFunc("/disk/all", remoteHandler.GetAllDisks).Methods("GET")
+	remoteAPI.HandleFunc("/disk/check-space", remoteHandler.CheckSpace).Methods("POST")
+	remoteAPI.HandleFunc("/ffmpeg/status", ffmpegHandler.Status).Methods("GET")
+	remoteAPI.HandleFunc("/ffmpeg/install", ffmpegHandler.Install).Methods("POST")
+
 	router.HandleFunc("/api/disk/info", diskHandler.GetDiskInfo).Methods("GET")
 	router.HandleFunc("/api/disk/all", diskHandler.GetAllDisks).Methods("GET")
 	router.HandleFunc("/api/disk/check-space", diskHandler.CheckSpace).Methods("POST")
@@ -121,17 +220,17 @@ func getStaticDir() string {
 		return "./static"
 	}
 	execPath := filepath.Dir(execDir)
-	
+
 	staticPath := filepath.Join(execPath, "static")
 	if _, err := os.Stat(staticPath); err == nil {
 		return staticPath
 	}
-	
+
 	staticPath = "./static"
 	if _, err := os.Stat(staticPath); err == nil {
 		return staticPath
 	}
-	
+
 	return staticPath
 }
 
@@ -184,7 +283,7 @@ func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key, X-Api-Key")
 
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(http.StatusOK)

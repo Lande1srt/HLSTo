@@ -55,3 +55,10 @@ backend/hlsto
 cleanup_config.json
 backend/cleanup_config.json
 /winui/static
+
+# FFmpeg 私有安装目录与下载临时文件（运行时生成）
+ffmpeg/
+*.download
+
+# 指定密钥下载缓存（运行时生成）
+hlskeys/

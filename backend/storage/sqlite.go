@@ -19,7 +19,7 @@ type SQLiteStorage struct {
 
 func NewSQLiteStorage() (*SQLiteStorage, error) {
 	log.Println("[SQLite] Initializing database...")
-	
+
 	pwd, err := os.Getwd()
 	if err != nil {
 		log.Printf("[SQLite] Error getting working directory: %v\n", err)
@@ -28,7 +28,7 @@ func NewSQLiteStorage() (*SQLiteStorage, error) {
 
 	dbPath := filepath.Join(pwd, "downloader.db")
 	log.Printf("[SQLite] Database path: %s\n", dbPath)
-	
+
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		log.Printf("[SQLite] Error opening database: %v\n", err)
@@ -36,7 +36,7 @@ func NewSQLiteStorage() (*SQLiteStorage, error) {
 	}
 
 	db.SetMaxOpenConns(1)
-	
+
 	if err := db.Ping(); err != nil {
 		log.Printf("[SQLite] Error pinging database: %v\n", err)
 		return nil, err
@@ -106,6 +106,25 @@ func createTables(db *sql.DB) error {
 	migrateTasksTable(db)
 	migrateSettingsTable(db)
 
+	apiKeysTable := `
+	CREATE TABLE IF NOT EXISTS api_keys (
+		id TEXT PRIMARY KEY,
+		name TEXT NOT NULL,
+		key_hash TEXT NOT NULL,
+		key_prefix TEXT NOT NULL,
+		permissions TEXT NOT NULL DEFAULT '*',
+		created_at DATETIME NOT NULL,
+		last_used_at DATETIME,
+		expires_at DATETIME,
+		is_active BOOLEAN DEFAULT 1
+	);
+	`
+
+	_, err = db.Exec(apiKeysTable)
+	if err != nil {
+		return err
+	}
+
 	settingsTable := `
 	CREATE TABLE IF NOT EXISTS settings (
 		id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -121,7 +140,20 @@ func createTables(db *sql.DB) error {
 		webdav_remote_dir TEXT DEFAULT '',
 		delete_after_upload BOOLEAN DEFAULT 0,
 		task_sort_order TEXT DEFAULT 'desc',
-		default_referer TEXT DEFAULT ''
+		default_referer TEXT DEFAULT '',
+		ffmpeg_mux_enabled BOOLEAN DEFAULT 0,
+		ffmpeg_mux_mode TEXT DEFAULT 'copy',
+		force_ffmpeg_mux BOOLEAN DEFAULT 0,
+		merge_after_download BOOLEAN DEFAULT 1,
+		merge_method TEXT DEFAULT 'auto',
+		hls_pack_enabled BOOLEAN DEFAULT 0,
+		hls_encrypt_enabled BOOLEAN DEFAULT 0,
+		hls_encrypt_mode TEXT DEFAULT 'generated',
+		hls_key_url TEXT DEFAULT '',
+		hls_pack_form TEXT DEFAULT 'multi',
+		compress_after_merge BOOLEAN DEFAULT 0,
+		compress_bitrate_threshold INTEGER DEFAULT 2048,
+		compress_target_bitrate INTEGER DEFAULT 0
 	);
 	`
 
@@ -151,8 +183,13 @@ func migrateTasksTable(db *sql.DB) {
 		"webdav_url":          "TEXT DEFAULT ''",
 		"webdav_username":     "TEXT DEFAULT ''",
 		"webdav_password":     "TEXT DEFAULT ''",
-		"webdav_remote_dir":    "TEXT DEFAULT ''",
+		"webdav_remote_dir":   "TEXT DEFAULT ''",
 		"delete_after_upload": "BOOLEAN DEFAULT 0",
+		"total_bytes":         "INTEGER DEFAULT 0",
+		"downloaded_bytes":    "INTEGER DEFAULT 0",
+		"key_path":            "TEXT DEFAULT ''",
+		"play_url":            "TEXT DEFAULT ''",
+		"work_dir":            "TEXT DEFAULT ''",
 	}
 
 	for col, colType := range columns {
@@ -167,17 +204,31 @@ func migrateTasksTable(db *sql.DB) {
 
 func migrateSettingsTable(db *sql.DB) {
 	columns := map[string]string{
-		"task_sort_order":           "TEXT DEFAULT 'desc'",
-		"default_referer":           "TEXT DEFAULT ''",
-		"download_concurrency":      "INTEGER DEFAULT 1",
-		"merge_concurrency":         "INTEGER DEFAULT 1",
-		"upload_concurrency":        "INTEGER DEFAULT 1",
-		"single_mode":               "BOOLEAN DEFAULT 0",
-		"enable_pre_download_check": "BOOLEAN DEFAULT 1",
-		"min_free_space_mb":         "INTEGER DEFAULT 500",
-		"disk_refresh_interval":     "INTEGER DEFAULT 10",
+		"task_sort_order":            "TEXT DEFAULT 'desc'",
+		"default_referer":            "TEXT DEFAULT ''",
+		"download_concurrency":       "INTEGER DEFAULT 1",
+		"merge_concurrency":          "INTEGER DEFAULT 1",
+		"upload_concurrency":         "INTEGER DEFAULT 1",
+		"single_mode":                "BOOLEAN DEFAULT 0",
+		"enable_pre_download_check":  "BOOLEAN DEFAULT 1",
+		"min_free_space_mb":          "INTEGER DEFAULT 500",
+		"disk_refresh_interval":      "INTEGER DEFAULT 10",
+		"ffmpeg_mux_enabled":         "BOOLEAN DEFAULT 0",
+		"ffmpeg_mux_mode":            "TEXT DEFAULT 'copy'",
+		"force_ffmpeg_mux":           "BOOLEAN DEFAULT 0",
+		"merge_after_download":       "BOOLEAN DEFAULT 1",
+		"merge_method":               "TEXT DEFAULT 'auto'",
+		"hls_pack_enabled":           "BOOLEAN DEFAULT 0",
+		"hls_encrypt_enabled":        "BOOLEAN DEFAULT 0",
+		"hls_encrypt_mode":           "TEXT DEFAULT 'generated'",
+		"hls_key_url":                "TEXT DEFAULT ''",
+		"hls_pack_form":              "TEXT DEFAULT 'multi'",
+		"compress_after_merge":       "BOOLEAN DEFAULT 0",
+		"compress_bitrate_threshold": "INTEGER DEFAULT 2048",
+		"compress_target_bitrate":    "INTEGER DEFAULT 0",
 	}
 
+	newlyAdded := make([]string, 0)
 	for col, colType := range columns {
 		query := fmt.Sprintf("ALTER TABLE settings ADD COLUMN %s %s", col, colType)
 		_, err := db.Exec(query)
@@ -185,30 +236,72 @@ func migrateSettingsTable(db *sql.DB) {
 			continue
 		}
 		log.Printf("[SQLite] Added column %s to settings table\n", col)
+		newlyAdded = append(newlyAdded, col)
+	}
+
+	// 一次性回填 merge_method（旧设置 → 新合并方式映射）：
+	// force=1 → ffmpeg；mux_enabled=1 → auto；均关闭 → gomedia（保持旧默认行为）
+	for _, col := range newlyAdded {
+		if col == "merge_method" {
+			_, err := db.Exec(`
+				UPDATE settings SET merge_method = CASE
+					WHEN force_ffmpeg_mux = 1 THEN 'ffmpeg'
+					WHEN ffmpeg_mux_enabled = 1 THEN 'auto'
+					ELSE 'gomedia'
+				END`)
+			if err != nil {
+				log.Printf("[SQLite] backfill merge_method failed: %v\n", err)
+			}
+			break
+		}
 	}
 }
 
 func (s *SQLiteStorage) GetSettings() (*model.Settings, error) {
 	query := `
-	SELECT 
+	SELECT
 		default_thread_count, default_output_name, default_save_path,
 		auto_clear, host_type, enable_webdav, webdav_url,
 		webdav_username, webdav_password, webdav_remote_dir,
 		delete_after_upload, task_sort_order, default_referer,
 		download_concurrency, merge_concurrency, upload_concurrency, single_mode,
-		enable_pre_download_check, min_free_space_mb, disk_refresh_interval
+		enable_pre_download_check, min_free_space_mb, disk_refresh_interval,
+		merge_after_download, merge_method, ffmpeg_mux_mode,
+		hls_pack_enabled, hls_encrypt_enabled, hls_encrypt_mode, hls_key_url,
+		hls_pack_form, compress_after_merge, compress_bitrate_threshold,
+		compress_target_bitrate
 	FROM settings WHERE id = 1
 	`
 
 	settings := &model.Settings{
-		// 默认值
-		DownloadConcurrency:     1,
-		MergeConcurrency:        1,
-		UploadConcurrency:       1,
-		SingleMode:              false,
-		EnablePreDownloadCheck:  true,
-		MinFreeSpaceMB:          500,
-		DiskRefreshInterval:     10,
+		DiskRefreshInterval: 10,
+		PostDownloadSettings: model.PostDownloadSettings{
+			MergeAfterDownload: true,
+			MergeMethod:        model.MergeMethodAuto,
+			FFmpegMuxMode:      model.MuxModeCopy,
+		},
+		HLSPackSettings: model.HLSPackSettings{
+			HLSPackEnabled:    false,
+			HLSEncryptEnabled: false,
+			HLSEncryptMode:    model.HLSEncryptGenerated,
+			HLSKeyURL:         "",
+			HLSPackForm:       model.HLSPackFormMulti,
+		},
+		CompressSettings: model.CompressSettings{
+			CompressAfterMerge:       false,
+			CompressBitrateThreshold: model.DefaultCompressBitrateThreshold,
+			CompressTargetBitrate:    0,
+		},
+		QueueSettings: model.QueueSettings{
+			DownloadConcurrency: 1,
+			MergeConcurrency:    1,
+			UploadConcurrency:   1,
+			SingleMode:          false,
+		},
+		PreDownloadSettings: model.PreDownloadSettings{
+			EnablePreDownloadCheck: true,
+			MinFreeSpaceMB:         500,
+		},
 	}
 	err := s.db.QueryRow(query).Scan(
 		&settings.DefaultThreadCount,
@@ -231,6 +324,17 @@ func (s *SQLiteStorage) GetSettings() (*model.Settings, error) {
 		&settings.EnablePreDownloadCheck,
 		&settings.MinFreeSpaceMB,
 		&settings.DiskRefreshInterval,
+		&settings.MergeAfterDownload,
+		&settings.MergeMethod,
+		&settings.FFmpegMuxMode,
+		&settings.HLSPackEnabled,
+		&settings.HLSEncryptEnabled,
+		&settings.HLSEncryptMode,
+		&settings.HLSKeyURL,
+		&settings.HLSPackForm,
+		&settings.CompressAfterMerge,
+		&settings.CompressBitrateThreshold,
+		&settings.CompressTargetBitrate,
 	)
 
 	if err == sql.ErrNoRows {
@@ -262,7 +366,18 @@ func (s *SQLiteStorage) SaveSettings(settings *model.Settings) error {
 		single_mode = ?,
 		enable_pre_download_check = ?,
 		min_free_space_mb = ?,
-		disk_refresh_interval = ?
+		disk_refresh_interval = ?,
+		merge_after_download = ?,
+		merge_method = ?,
+		ffmpeg_mux_mode = ?,
+		hls_pack_enabled = ?,
+		hls_encrypt_enabled = ?,
+		hls_encrypt_mode = ?,
+		hls_key_url = ?,
+		hls_pack_form = ?,
+		compress_after_merge = ?,
+		compress_bitrate_threshold = ?,
+		compress_target_bitrate = ?
 	WHERE id = 1
 	`
 
@@ -288,6 +403,17 @@ func (s *SQLiteStorage) SaveSettings(settings *model.Settings) error {
 		settings.EnablePreDownloadCheck,
 		settings.MinFreeSpaceMB,
 		settings.DiskRefreshInterval,
+		settings.MergeAfterDownload,
+		settings.MergeMethod,
+		settings.FFmpegMuxMode,
+		settings.HLSPackEnabled,
+		settings.HLSEncryptEnabled,
+		settings.HLSEncryptMode,
+		settings.HLSKeyURL,
+		settings.HLSPackForm,
+		settings.CompressAfterMerge,
+		settings.CompressBitrateThreshold,
+		settings.CompressTargetBitrate,
 	)
 
 	return err
@@ -296,12 +422,13 @@ func (s *SQLiteStorage) SaveSettings(settings *model.Settings) error {
 func (s *SQLiteStorage) AddTask(task *model.Task) error {
 	query := `
 	INSERT INTO tasks (
-		id, url, name, status, progress, speed, 
+		id, url, name, status, progress, speed,
 		thread_count, host_type, cookie, referer, auto_clear, save_path,
 		enable_webdav, webdav_url, webdav_username, webdav_password,
 		webdav_remote_dir, delete_after_upload,
-		total_segments, downloaded_segments, created_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		total_segments, downloaded_segments, total_bytes, downloaded_bytes,
+		key_path, play_url, work_dir, created_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 
 	_, err := s.db.Exec(
@@ -326,6 +453,11 @@ func (s *SQLiteStorage) AddTask(task *model.Task) error {
 		task.DeleteAfterUpload,
 		task.TotalSegments,
 		task.DownloadedSegments,
+		task.TotalBytes,
+		task.DownloadedBytes,
+		task.KeyPath,
+		task.PlayURL,
+		task.WorkDir,
 		task.CreatedAt.Format(time.RFC3339),
 	)
 
@@ -341,13 +473,18 @@ func (s *SQLiteStorage) UpdateTask(task *model.Task) error {
 		output_path = ?,
 		total_segments = ?,
 		downloaded_segments = ?,
+		total_bytes = ?,
+		downloaded_bytes = ?,
 		completed_at = ?,
 		enable_webdav = ?,
 		webdav_url = ?,
 		webdav_username = ?,
 		webdav_password = ?,
 		webdav_remote_dir = ?,
-		delete_after_upload = ?
+		delete_after_upload = ?,
+		key_path = ?,
+		play_url = ?,
+		work_dir = ?
 	WHERE id = ?
 	`
 
@@ -364,6 +501,8 @@ func (s *SQLiteStorage) UpdateTask(task *model.Task) error {
 		task.OutputPath,
 		task.TotalSegments,
 		task.DownloadedSegments,
+		task.TotalBytes,
+		task.DownloadedBytes,
 		completedAt,
 		task.EnableWebDAV,
 		task.WebDAVURL,
@@ -371,6 +510,9 @@ func (s *SQLiteStorage) UpdateTask(task *model.Task) error {
 		task.WebDAVPassword,
 		task.WebDAVRemoteDir,
 		task.DeleteAfterUpload,
+		task.KeyPath,
+		task.PlayURL,
+		task.WorkDir,
 		task.ID,
 	)
 
@@ -379,13 +521,13 @@ func (s *SQLiteStorage) UpdateTask(task *model.Task) error {
 
 func (s *SQLiteStorage) GetTask(taskID string) (*model.Task, error) {
 	query := `
-	SELECT 
+SELECT
 		id, url, name, status, progress, speed,
 		thread_count, host_type, cookie, referer, auto_clear, save_path,
-		output_path, enable_webdav, webdav_url, webdav_username,
+		COALESCE(output_path, ''), enable_webdav, webdav_url, webdav_username,
 		webdav_password, webdav_remote_dir, delete_after_upload,
-		total_segments, downloaded_segments,
-		created_at, completed_at
+		total_segments, downloaded_segments, key_path, play_url, work_dir,
+		created_at, COALESCE(completed_at, '')
 	FROM tasks WHERE id = ?
 	`
 
@@ -416,6 +558,9 @@ func (s *SQLiteStorage) GetTask(taskID string) (*model.Task, error) {
 		&task.DeleteAfterUpload,
 		&task.TotalSegments,
 		&task.DownloadedSegments,
+		&task.KeyPath,
+		&task.PlayURL,
+		&task.WorkDir,
 		&task.CreatedAt,
 		&completedAtStr,
 	)
@@ -440,13 +585,13 @@ func (s *SQLiteStorage) GetTask(taskID string) (*model.Task, error) {
 
 func (s *SQLiteStorage) GetAllTasks() ([]*model.Task, error) {
 	query := `
-	SELECT 
+	SELECT
 		id, url, name, status, progress, speed,
 		thread_count, host_type, cookie, referer, auto_clear, save_path,
-		output_path, enable_webdav, webdav_url, webdav_username,
+		COALESCE(output_path, ''), enable_webdav, webdav_url, webdav_username,
 		webdav_password, webdav_remote_dir, delete_after_upload,
-		total_segments, downloaded_segments,
-		created_at, completed_at
+		total_segments, downloaded_segments, total_bytes, downloaded_bytes, key_path, play_url, work_dir,
+		created_at, COALESCE(completed_at, '')
 	FROM tasks ORDER BY created_at DESC
 	`
 
@@ -484,6 +629,11 @@ func (s *SQLiteStorage) GetAllTasks() ([]*model.Task, error) {
 			&task.DeleteAfterUpload,
 			&task.TotalSegments,
 			&task.DownloadedSegments,
+			&task.TotalBytes,
+			&task.DownloadedBytes,
+			&task.KeyPath,
+			&task.PlayURL,
+			&task.WorkDir,
 			&task.CreatedAt,
 			&completedAtStr,
 		)
@@ -544,12 +694,27 @@ func (s *SQLiteStorage) AddLog(taskID, level, message string) error {
 }
 
 func (s *SQLiteStorage) GetLogs(taskID string) ([]*model.LogEntry, error) {
+	return s.GetLogsFiltered(taskID, "", 0)
+}
+
+// GetLogsFiltered 按级别（空串为全部）与条数上限（<=0 为不限）查询任务日志，按时间正序
+func (s *SQLiteStorage) GetLogsFiltered(taskID, level string, limit int) ([]*model.LogEntry, error) {
 	query := `
 	SELECT level, message, timestamp FROM logs
-	WHERE task_id = ? ORDER BY timestamp ASC
+	WHERE task_id = ?
 	`
+	args := []interface{}{taskID}
+	if level != "" {
+		query += " AND level = ?"
+		args = append(args, level)
+	}
+	query += " ORDER BY id ASC"
+	if limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, limit)
+	}
 
-	rows, err := s.db.Query(query, taskID)
+	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -647,4 +812,145 @@ func (s *SQLiteStorage) GetRecentTasks(limit int) ([]*model.Task, error) {
 	}
 
 	return tasks, nil
+}
+
+func (s *SQLiteStorage) AddAPIKey(key *model.APIKey) error {
+	query := `
+	INSERT INTO api_keys (id, name, key_hash, key_prefix, permissions, created_at, expires_at, is_active)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`
+
+	var expiresAt string
+	if key.ExpiresAt != nil {
+		expiresAt = key.ExpiresAt.Format(time.RFC3339)
+	}
+
+	_, err := s.db.Exec(
+		query,
+		key.ID,
+		key.Name,
+		key.KeyHash,
+		key.KeyPrefix,
+		key.Permissions,
+		key.CreatedAt.Format(time.RFC3339),
+		expiresAt,
+		key.IsActive,
+	)
+	return err
+}
+
+func (s *SQLiteStorage) GetAPIKeyByHash(keyHash string) (*model.APIKey, error) {
+	query := `
+	SELECT id, name, key_hash, key_prefix, permissions, created_at, last_used_at, expires_at, is_active
+	FROM api_keys WHERE key_hash = ?
+	`
+
+	row := s.db.QueryRow(query, keyHash)
+	key := &model.APIKey{}
+	var lastUsedAt sql.NullString
+	var expiresAt sql.NullString
+
+	err := row.Scan(
+		&key.ID,
+		&key.Name,
+		&key.KeyHash,
+		&key.KeyPrefix,
+		&key.Permissions,
+		&key.CreatedAt,
+		&lastUsedAt,
+		&expiresAt,
+		&key.IsActive,
+	)
+
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	if lastUsedAt.Valid && lastUsedAt.String != "" {
+		t, err := time.Parse(time.RFC3339, lastUsedAt.String)
+		if err == nil {
+			key.LastUsedAt = &t
+		}
+	}
+	if expiresAt.Valid && expiresAt.String != "" {
+		t, err := time.Parse(time.RFC3339, expiresAt.String)
+		if err == nil {
+			key.ExpiresAt = &t
+		}
+	}
+
+	return key, nil
+}
+
+func (s *SQLiteStorage) ListAPIKeys() ([]*model.APIKey, error) {
+	query := `
+	SELECT id, name, key_hash, key_prefix, permissions, created_at, last_used_at, expires_at, is_active
+	FROM api_keys ORDER BY created_at DESC
+	`
+
+	rows, err := s.db.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var keys []*model.APIKey
+	for rows.Next() {
+		key := &model.APIKey{}
+		var lastUsedAt sql.NullString
+		var expiresAt sql.NullString
+
+		err := rows.Scan(
+			&key.ID,
+			&key.Name,
+			&key.KeyHash,
+			&key.KeyPrefix,
+			&key.Permissions,
+			&key.CreatedAt,
+			&lastUsedAt,
+			&expiresAt,
+			&key.IsActive,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		if lastUsedAt.Valid && lastUsedAt.String != "" {
+			t, err := time.Parse(time.RFC3339, lastUsedAt.String)
+			if err == nil {
+				key.LastUsedAt = &t
+			}
+		}
+		if expiresAt.Valid && expiresAt.String != "" {
+			t, err := time.Parse(time.RFC3339, expiresAt.String)
+			if err == nil {
+				key.ExpiresAt = &t
+			}
+		}
+
+		keys = append(keys, key)
+	}
+
+	return keys, nil
+}
+
+func (s *SQLiteStorage) UpdateAPIKeyLastUsed(id string) error {
+	query := `UPDATE api_keys SET last_used_at = ? WHERE id = ?`
+	_, err := s.db.Exec(query, time.Now().Format(time.RFC3339), id)
+	return err
+}
+
+func (s *SQLiteStorage) RevokeAPIKey(id string) error {
+	query := `UPDATE api_keys SET is_active = 0 WHERE id = ?`
+	_, err := s.db.Exec(query, id)
+	return err
+}
+
+func (s *SQLiteStorage) DeleteAPIKey(id string) error {
+	query := `DELETE FROM api_keys WHERE id = ?`
+	_, err := s.db.Exec(query, id)
+	return err
 }

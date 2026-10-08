@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"m3u8-downloader-web/model"
 	"m3u8-downloader-web/storage"
 )
 
@@ -20,24 +21,35 @@ type CleanupConfig struct {
 }
 
 type SchedulerService struct {
-	storage    *storage.SQLiteStorage
-	configPath string
-	config     CleanupConfig
-	stopChan   chan struct{}
-	timerChan  chan struct{} // 用于通知重新计算计时器
+	storage     *storage.SQLiteStorage
+	taskManager *TaskManager
+	configPath  string
+	config      CleanupConfig
+	stopChan    chan struct{}
+	timerChan   chan struct{} // 用于通知重新计算计时器
 }
 
-func NewSchedulerService(storage *storage.SQLiteStorage) *SchedulerService {
+// activeTaskStatuses 清理时需要避让的活跃任务状态
+var activeTaskStatuses = map[model.TaskStatus]bool{
+	model.StatusPending:     true,
+	model.StatusDownloading: true,
+	model.StatusMerging:     true,
+	model.StatusPaused:      true,
+	model.StatusUploading:   true,
+}
+
+func NewSchedulerService(storage *storage.SQLiteStorage, taskManager *TaskManager) *SchedulerService {
 	pwd, _ := os.Getwd()
 	configPath := filepath.Join(pwd, "cleanup_config.json")
-	
+
 	s := &SchedulerService{
-		storage:    storage,
-		configPath: configPath,
-		stopChan:   make(chan struct{}),
-		timerChan:  make(chan struct{}, 1), // 带缓冲，避免发送阻塞
+		storage:     storage,
+		taskManager: taskManager,
+		configPath:  configPath,
+		stopChan:    make(chan struct{}),
+		timerChan:   make(chan struct{}, 1), // 带缓冲，避免发送阻塞
 	}
-	
+
 	s.loadConfig()
 	return s
 }
@@ -76,8 +88,11 @@ func (s *SchedulerService) Start() {
 			select {
 			case <-timer.C:
 				if s.config.Enabled {
-					s.performCleanup()
-					s.config.LastRun = time.Now()
+					if s.performCleanup() {
+						// 只有实际执行了清理才更新 LastRun，否则下次定时继续尝试
+						s.config.LastRun = time.Now()
+						s.saveConfig()
+					}
 				}
 			case <-s.timerChan:
 				// 配置更新，重新计算计时器
@@ -112,12 +127,52 @@ func (s *SchedulerService) Stop() {
 	close(s.stopChan)
 }
 
-func (s *SchedulerService) performCleanup() {
+// hasActiveTasks 检查是否有正在下载/合并/上传/暂停的活跃任务
+func (s *SchedulerService) hasActiveTasks() bool {
+	if s.taskManager == nil {
+		return false
+	}
+	for _, t := range s.taskManager.ListTasks() {
+		if activeTaskStatuses[t.Status] {
+			return true
+		}
+	}
+	return false
+}
+
+// protectedWorkDirs 返回所有任务当前工作目录的绝对路径集合。
+// 只要 download_ 目录仍被某个任务引用（含 failed/completed，随时可能被重试/强制合并复用），
+// 就不得清理——这从路径归属上杜绝"清理与重试并发误删"，不依赖检查时序。
+func (s *SchedulerService) protectedWorkDirs() map[string]bool {
+	protected := make(map[string]bool)
+	if s.taskManager == nil {
+		return protected
+	}
+	for _, t := range s.taskManager.ListTasks() {
+		wd := strings.TrimSpace(t.WorkDir)
+		if wd == "" {
+			continue
+		}
+		if abs, err := filepath.Abs(wd); err == nil {
+			protected[abs] = true
+		}
+	}
+	return protected
+}
+
+// performCleanup 返回 true 表示实际执行了清理；false 表示因活跃任务而跳过
+func (s *SchedulerService) performCleanup() bool {
+	// 优先避让：有活跃任务则跳过本轮
+	if s.hasActiveTasks() {
+		log.Println("[Scheduler] 检测到活跃任务（下载/合并/上传/暂停中），跳过本轮清理，下次定时继续")
+		return false
+	}
+
 	log.Println("[Scheduler] 正在执行定时自动清理任务...")
-	
+
 	pwd, err := os.Getwd()
 	if err != nil {
-		return
+		return false
 	}
 
 	dirsToClear := []string{pwd}
@@ -127,6 +182,7 @@ func (s *SchedulerService) performCleanup() {
 	}
 
 	count := 0
+	protected := s.protectedWorkDirs()
 	for _, dir := range dirsToClear {
 		files, err := os.ReadDir(dir)
 		if err != nil {
@@ -135,7 +191,12 @@ func (s *SchedulerService) performCleanup() {
 
 		for _, f := range files {
 			if f.IsDir() && strings.HasPrefix(f.Name(), "download_") {
-				err := os.RemoveAll(filepath.Join(dir, f.Name()))
+				full := filepath.Join(dir, f.Name())
+				if abs, err := filepath.Abs(full); err == nil && protected[abs] {
+					log.Printf("[Scheduler] 跳过仍被任务引用的目录: %s\n", full)
+					continue
+				}
+				err := os.RemoveAll(full)
 				if err != nil {
 					log.Printf("[Scheduler] 删除缓存目录失败: %v\n", err)
 				} else {
@@ -145,6 +206,7 @@ func (s *SchedulerService) performCleanup() {
 		}
 	}
 	log.Printf("[Scheduler] 自动清理完成，已移除 %d 个缓存文件夹\n", count)
+	return true
 }
 
 // 提供给外部更新配置的方法
@@ -157,7 +219,7 @@ func (s *SchedulerService) UpdateConfig(newConfig CleanupConfig) {
 	s.saveConfig()
 	log.Printf("[Scheduler] 自动清理规则已更新: 每 %d %s (启用: %v)\n",
 		s.config.Interval, s.config.Unit, s.config.Enabled)
-	
+
 	// 通知计时器重新计算
 	select {
 	case s.timerChan <- struct{}{}:
@@ -169,4 +231,49 @@ func (s *SchedulerService) UpdateConfig(newConfig CleanupConfig) {
 
 func (s *SchedulerService) GetConfig() CleanupConfig {
 	return s.config
+}
+
+// ClearCache 手动清理按钮 — 同样避让活跃任务
+func (s *SchedulerService) ClearCache() int {
+	if s.hasActiveTasks() {
+		log.Println("[Scheduler] 有活跃任务正在处理，手动清理已跳过")
+		return 0
+	}
+
+	pwd, err := os.Getwd()
+	if err != nil {
+		return 0
+	}
+
+	dirsToClear := []string{pwd}
+	settings, err := s.storage.GetSettings()
+	if err == nil && settings.DefaultSavePath != "" && settings.DefaultSavePath != pwd {
+		dirsToClear = append(dirsToClear, settings.DefaultSavePath)
+	}
+
+	count := 0
+	protected := s.protectedWorkDirs()
+	for _, dir := range dirsToClear {
+		files, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+
+		for _, f := range files {
+			if f.IsDir() && strings.HasPrefix(f.Name(), "download_") {
+				full := filepath.Join(dir, f.Name())
+				if abs, err := filepath.Abs(full); err == nil && protected[abs] {
+					log.Printf("[Scheduler] 跳过仍被任务引用的目录: %s\n", full)
+					continue
+				}
+				err := os.RemoveAll(full)
+				if err != nil {
+					log.Printf("[Scheduler] 删除缓存目录失败: %v\n", err)
+				} else {
+					count++
+				}
+			}
+		}
+	}
+	return count
 }

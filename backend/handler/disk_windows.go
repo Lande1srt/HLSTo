@@ -44,37 +44,37 @@ func getDiskSpaceWindows(path string) (*diskSpaceInfo, error) {
 
 func getAllDisksWindows() ([]*DiskInfo, error) {
 	var disks []*DiskInfo
-	
+
 	kernel32 := syscall.MustLoadDLL("kernel32.dll")
 	getLogicalDrives := kernel32.MustFindProc("GetLogicalDrives")
-	
+
 	ret, _, _ := getLogicalDrives.Call()
 	drives := uint32(ret)
-	
+
 	for i := 0; i < 26; i++ {
 		if drives&(1<<uint(i)) != 0 {
-			driveLetter := string('A' + i)
+			driveLetter := string(rune('A' + i))
 			drivePath := driveLetter + ":/"
-			
+
 			var freeBytesAvailable, totalNumberOfBytes, totalNumberOfFreeBytes uint64
-			
+
 			getDiskFreeSpaceEx := kernel32.MustFindProc("GetDiskFreeSpaceExW")
 			drivePtr, _ := syscall.UTF16PtrFromString(drivePath)
-			
+
 			ret, _, _ := getDiskFreeSpaceEx.Call(
 				uintptr(unsafe.Pointer(drivePtr)),
 				uintptr(unsafe.Pointer(&freeBytesAvailable)),
 				uintptr(unsafe.Pointer(&totalNumberOfBytes)),
 				uintptr(unsafe.Pointer(&totalNumberOfFreeBytes)),
 			)
-			
+
 			if ret == 0 || totalNumberOfBytes == 0 {
 				continue
 			}
-			
+
 			used := totalNumberOfBytes - freeBytesAvailable
 			usedPercent := float64(used) / float64(totalNumberOfBytes) * 100
-			
+
 			disks = append(disks, &DiskInfo{
 				MountPoint:  drivePath,
 				Device:      driveLetter + ":",
@@ -88,7 +88,7 @@ func getAllDisksWindows() ([]*DiskInfo, error) {
 			})
 		}
 	}
-	
+
 	return disks, nil
 }
 
@@ -103,12 +103,12 @@ func getDriveRoot(path string) string {
 func getDriveType(driveLetter string) string {
 	kernel32 := syscall.MustLoadDLL("kernel32.dll")
 	getDriveType := kernel32.MustFindProc("GetDriveTypeW")
-	
+
 	drivePath := driveLetter + ":/"
 	drivePtr, _ := syscall.UTF16PtrFromString(drivePath)
-	
+
 	ret, _, _ := getDriveType.Call(uintptr(unsafe.Pointer(drivePtr)))
-	
+
 	switch ret {
 	case 2:
 		return "Removable"

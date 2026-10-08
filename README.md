@@ -95,7 +95,7 @@ go run main.go
 2. 在服务器上进入 `backend` 目录。
 3. 执行编译（Linux 示例）：
    ```bash
-   CGO_ENABLED=1 go build -o m3u8-downloader-web main.go
+   CGO_ENABLED=0 go build -o m3u8-downloader-web main.go
    ```
 4. 运行生成的可执行文件即可。
 

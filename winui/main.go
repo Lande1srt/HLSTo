@@ -117,7 +117,7 @@ func createRouter() *mux.Router {
 	taskManager := service.NewTaskManager(dbStorage)
 	wsManager := websocket.NewWebSocketManager()
 	downloaderService := service.NewDownloaderService(taskManager, wsManager)
-	schedulerService := service.NewSchedulerService(dbStorage)
+	schedulerService := service.NewSchedulerService(dbStorage, taskManager)
 	schedulerService.Start()
 
 	// 初始化处理器

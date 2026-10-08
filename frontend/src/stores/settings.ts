@@ -23,6 +23,20 @@ export interface Settings {
   enablePreDownloadCheck: boolean
   minFreeSpaceMB: number
   diskRefreshInterval: number
+  // 下载完成动作：合并
+  mergeAfterDownload: boolean
+  mergeMethod: string // auto(默认,检测ffmpeg兜底go) / ffmpeg / gomedia
+  ffmpegMuxMode: string // copy(源流式复制) / h264 / h265（ffmpeg处理时生效）
+  // 下载完成动作：二次 HLS 分片与加密
+  hlsPackEnabled: boolean
+  hlsEncryptEnabled: boolean
+  hlsEncryptMode: string // generated(独立密钥) / specified(指定URL)
+  hlsKeyURL: string
+  hlsPackForm: string // multi(默认,多文件目录) / single(单 tsbin + BYTERANGE，可选)
+  // 合并后高码率压缩（默认关闭，阈值默认 2048kbps）
+  compressAfterMerge: boolean
+  compressBitrateThreshold: number
+  compressTargetBitrate: number
 }
 
 export const useSettingsStore = defineStore('settings', () => {
@@ -46,7 +60,18 @@ export const useSettingsStore = defineStore('settings', () => {
     singleMode: false,
     enablePreDownloadCheck: true,
     minFreeSpaceMB: 500,
-    diskRefreshInterval: 10
+    diskRefreshInterval: 10,
+    mergeAfterDownload: true,
+    mergeMethod: 'auto',
+    ffmpegMuxMode: 'copy',
+    hlsPackEnabled: false,
+    hlsEncryptEnabled: false,
+    hlsEncryptMode: 'generated',
+    hlsKeyURL: '',
+    hlsPackForm: 'multi',
+    compressAfterMerge: false,
+    compressBitrateThreshold: 2048,
+    compressTargetBitrate: 0
   })
 
   const loadSettings = async () => {

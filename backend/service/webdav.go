@@ -161,6 +161,16 @@ func (w *WebDAVService) UploadFile(localPath, remoteFileName string, stop <-chan
 	return nil
 }
 
+// PublicURL 构造远程文件的公开访问 URL：WebDAV 根地址（可能含路径前缀）+ 远程绝对路径。
+// 仅用于回写任务的可播放地址；不做 path.Join 以保留 URL 路径中的双斜杠语义。
+func (w *WebDAVService) PublicURL(remoteAbsPath string) string {
+	base := strings.TrimSuffix(w.config.URL, "/")
+	if !strings.HasPrefix(remoteAbsPath, "/") {
+		remoteAbsPath = "/" + remoteAbsPath
+	}
+	return base + remoteAbsPath
+}
+
 // MkdirAll 递归创建远程目录
 func (w *WebDAVService) MkdirAll(remoteDir string) error {
 	if w.client == nil {
@@ -208,6 +218,32 @@ func (w *WebDAVService) TestConnection() error {
 	}
 
 	log.Println("[WebDAV] Connection test successful")
+	return nil
+}
+
+// RemoteFilePath 返回 RemoteDir 下某文件的远程绝对路径（目录缺失时按 / 处理）
+func (w *WebDAVService) RemoteFilePath(remoteFileName string) string {
+	remoteDir := w.config.RemoteDir
+	if remoteDir == "" {
+		remoteDir = "/"
+	}
+	if !strings.HasPrefix(remoteDir, "/") {
+		remoteDir = "/" + remoteDir
+	}
+	return path.Join(remoteDir, remoteFileName)
+}
+
+// Remove 删除指定远程绝对路径的文件；文件不存在不视为错误
+func (w *WebDAVService) Remove(remoteAbsPath string) error {
+	if w.client == nil {
+		return fmt.Errorf("WebDAV is not enabled")
+	}
+	if err := w.client.Remove(remoteAbsPath); err != nil {
+		if gowebdav.IsErrNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to remove remote file %s: %v", remoteAbsPath, err)
+	}
 	return nil
 }
 

@@ -64,9 +64,14 @@ func (wm *WebSocketManager) BroadcastToTask(taskID string, message model.WebSock
 
 func (wm *WebSocketManager) closeClient(client *Client) {
 	wm.mu.Lock()
-	defer wm.mu.Unlock()
+	// 只有仍在 map 里才 close，避免与 Unregister / 另一个 closeClient 并发重复 close
+	if _, ok := wm.clients[client]; !ok {
+		wm.mu.Unlock()
+		return
+	}
 	delete(wm.clients, client)
 	close(client.send)
+	wm.mu.Unlock()
 	client.conn.Close()
 }
 

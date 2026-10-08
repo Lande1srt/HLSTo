@@ -10,9 +10,6 @@ RUN npm run build
 # --- 后端构建阶段 ---
 FROM golang:1.21-alpine AS backend-builder
 
-# 安装构建依赖 (sqlite3 需要 gcc 和 musl-dev)
-RUN apk add --no-cache gcc musl-dev
-
 WORKDIR /app
 # 复制 go.mod 和 go.sum 并下载依赖
 COPY backend/go.mod backend/go.sum ./backend/
@@ -25,13 +22,13 @@ COPY --from=frontend-builder /app/backend/static ./backend/static
 
 # 构建后端
 WORKDIR /app/backend
-RUN CGO_ENABLED=1 GOOS=linux go build -ldflags "-s -w" -o m3u8-downloader-web main.go
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags "-s -w" -o m3u8-downloader-web main.go
 
 # --- 最终运行阶段 ---
 FROM alpine:latest
 
-# 安装运行时必要的库
-RUN apk add --no-cache ca-certificates libc6-compat
+# 安装运行时必要的库（纯 Go 静态编译不需要 libc 兼容层）
+RUN apk add --no-cache ca-certificates
 
 WORKDIR /app
 

@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
-	"m3u8-downloader-web/model"
 )
 
 var (
@@ -27,7 +26,7 @@ func InitAuth() {
 	// 系统环境变量优先级高于 .env
 	USERNAME = os.Getenv("AUTH_USERNAME")
 	PASSWORD = os.Getenv("AUTH_PASSWORD")
-	
+
 	secret := os.Getenv("JWT_SECRET")
 	if secret != "" {
 		JWT_SECRET = []byte(secret)
@@ -47,61 +46,43 @@ type LoginResponse struct {
 
 func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 	if !isAuthEnabled() {
-		h.sendSuccess(w, map[string]string{"message": "Authentication is disabled"})
+		OK(w, map[string]string{"message": "Authentication is disabled"})
 		return
 	}
 
 	var req LoginRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		h.sendError(w, http.StatusBadRequest, "无效的请求体")
+		Err(w, http.StatusBadRequest, "无效的请求体")
 		return
 	}
 
 	if req.Username == USERNAME && req.Password == PASSWORD {
 		token := createToken(req.Username)
-		h.sendSuccess(w, LoginResponse{Token: token})
+		OK(w, LoginResponse{Token: token})
 	} else {
-		h.sendError(w, http.StatusUnauthorized, "用户名或密码错误")
+		Err(w, http.StatusUnauthorized, "用户名或密码错误")
 	}
 }
 
 func (h *AuthHandler) CheckAuth(w http.ResponseWriter, r *http.Request) {
 	if !isAuthEnabled() {
-		h.sendSuccess(w, map[string]bool{"authenticated": true, "authEnabled": false})
+		OK(w, map[string]bool{"authenticated": true, "authEnabled": false})
 		return
 	}
 
 	token := extractToken(r)
 	if token == "" {
-		h.sendSuccess(w, map[string]bool{"authenticated": false, "authEnabled": true})
+		OK(w, map[string]bool{"authenticated": false, "authEnabled": true})
 		return
 	}
 
 	_, err := validateToken(token)
 	if err != nil {
-		h.sendSuccess(w, map[string]bool{"authenticated": false, "authEnabled": true})
+		OK(w, map[string]bool{"authenticated": false, "authEnabled": true})
 		return
 	}
 
-	h.sendSuccess(w, map[string]bool{"authenticated": true, "authEnabled": true})
-}
-
-func (h *AuthHandler) sendSuccess(w http.ResponseWriter, data interface{}) {
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(model.APIResponse{
-		Code:    200,
-		Message: "success",
-		Data:    data,
-	})
-}
-
-func (h *AuthHandler) sendError(w http.ResponseWriter, status int, message string) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(model.APIResponse{
-		Code:    status,
-		Message: message,
-	})
+	OK(w, map[string]bool{"authenticated": true, "authEnabled": true})
 }
 
 func isAuthEnabled() bool {
@@ -152,23 +133,13 @@ func AuthMiddleware(next http.Handler) http.Handler {
 
 		token := extractToken(r)
 		if token == "" {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusUnauthorized)
-			json.NewEncoder(w).Encode(model.APIResponse{
-				Code:    http.StatusUnauthorized,
-				Message: "未授权访问，请先登录",
-			})
+			Err(w, http.StatusUnauthorized, "未授权访问，请先登录")
 			return
 		}
 
 		_, err := validateToken(token)
 		if err != nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusUnauthorized)
-			json.NewEncoder(w).Encode(model.APIResponse{
-				Code:    http.StatusUnauthorized,
-				Message: "Token 无效或已过期",
-			})
+			Err(w, http.StatusUnauthorized, "Token 无效或已过期")
 			return
 		}
 

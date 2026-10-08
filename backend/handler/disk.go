@@ -3,8 +3,6 @@ package handler
 import (
 	"encoding/json"
 	"net/http"
-
-	"m3u8-downloader-web/model"
 )
 
 type DiskHandler struct{}
@@ -27,52 +25,52 @@ type DiskInfo struct {
 
 func (h *DiskHandler) GetDiskInfo(w http.ResponseWriter, r *http.Request) {
 	path := "."
-	
+
 	if r.URL.Query().Get("path") != "" {
 		path = r.URL.Query().Get("path")
 	}
-	
+
 	diskInfo, err := getDiskInfo(path)
 	if err != nil {
-		h.sendError(w, http.StatusInternalServerError, "获取磁盘信息失败: "+err.Error())
+		Err(w, http.StatusInternalServerError, "获取磁盘信息失败: "+err.Error())
 		return
 	}
-	
-	h.sendSuccess(w, diskInfo)
+
+	OK(w, diskInfo)
 }
 
 func (h *DiskHandler) GetAllDisks(w http.ResponseWriter, r *http.Request) {
 	disks, err := getAllDisks()
 	if err != nil {
-		h.sendError(w, http.StatusInternalServerError, "获取磁盘列表失败: "+err.Error())
+		Err(w, http.StatusInternalServerError, "获取磁盘列表失败: "+err.Error())
 		return
 	}
-	
-	h.sendSuccess(w, disks)
+
+	OK(w, disks)
 }
 
 func (h *DiskHandler) CheckSpace(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Path string `json:"path"`
 	}
-	
+
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		h.sendError(w, http.StatusBadRequest, "无效的请求体")
+		Err(w, http.StatusBadRequest, "无效的请求体")
 		return
 	}
-	
+
 	path := req.Path
 	if path == "" {
 		path = "."
 	}
-	
+
 	diskInfo, err := getDiskInfo(path)
 	if err != nil {
-		h.sendError(w, http.StatusInternalServerError, "检查磁盘空间失败: "+err.Error())
+		Err(w, http.StatusInternalServerError, "检查磁盘空间失败: "+err.Error())
 		return
 	}
-	
-	h.sendSuccess(w, diskInfo)
+
+	OK(w, diskInfo)
 }
 
 func getDiskInfo(path string) (*DiskInfo, error) {
@@ -80,14 +78,14 @@ func getDiskInfo(path string) (*DiskInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	
+
 	total := info.total
 	free := info.free
 	used := total - free
-	
+
 	freePercent := float64(free) / float64(total) * 100
 	usedPercent := float64(used) / float64(total) * 100
-	
+
 	return &DiskInfo{
 		MountPoint:  path,
 		Total:       total,
@@ -117,21 +115,3 @@ type diskSpaceInfo struct {
 
 var getDiskSpace func(path string) (*diskSpaceInfo, error)
 var getAllDisks func() ([]*DiskInfo, error)
-
-func (h *DiskHandler) sendSuccess(w http.ResponseWriter, data interface{}) {
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(model.APIResponse{
-		Code:    200,
-		Message: "success",
-		Data:    data,
-	})
-}
-
-func (h *DiskHandler) sendError(w http.ResponseWriter, status int, message string) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(model.APIResponse{
-		Code:    status,
-		Message: message,
-	})
-}
