@@ -9,7 +9,7 @@ import type { Task } from '@/stores/download'
 const downloadStore = useDownloadStore()
 const settingsStore = useSettingsStore()
 const tasks = ref<Task[]>([])
-const filter = ref<'all' | 'pending' | 'downloading' | 'merging' | 'uploading' | 'completed' | 'failed' | 'paused'>('all')
+const filter = ref<'all' | 'pending' | 'downloading' | 'merging' | 'compressing' | 'packing' | 'uploading' | 'completed' | 'failed' | 'paused'>('all')
 const searchKeyword = ref('')
 const loading = ref(false)
 const ws = ref<WebSocket | null>(null)
@@ -222,8 +222,15 @@ const logOrder = ref<'asc' | 'desc'>('asc')
 const logBox = ref<HTMLElement | null>(null)
 let logRefreshTimer: number | null = null
 
+// RUNNING_STATUSES 已获取阶段槽位、正在执行的五个阶段状态
+const RUNNING_STATUSES: Task['status'][] = ['downloading', 'merging', 'compressing', 'packing', 'uploading']
+
+// isTaskRunning 任务正在五个执行阶段之一运行（可暂停）
+const isTaskRunning = (task: Task | null) =>
+  !!task && RUNNING_STATUSES.includes(task.status)
+
 const isTaskActive = (task: Task | null) =>
-  !!task && ['pending', 'downloading', 'merging', 'uploading', 'paused'].includes(task.status)
+  !!task && ['pending', ...RUNNING_STATUSES, 'paused'].includes(task.status)
 
 // displayedLogs 展示用日志（服务端正序返回，倒序仅在视图层反转）
 const displayedLogs = computed(() =>
@@ -356,6 +363,39 @@ const filteredTasks = computed(() => {
   })
 })
 
+// ============ 前端分页：仅渲染当前页，避免任务过多时页面过长 ============
+const currentPage = ref(1)
+const pageSize = ref(20)
+const PAGE_SIZE_OPTIONS = [10, 20, 50, 100]
+
+// 总页数（至少 1）
+const totalPages = computed(() =>
+  Math.max(1, Math.ceil(filteredTasks.value.length / pageSize.value))
+)
+
+// 当前页实际渲染的任务切片
+const pagedTasks = computed(() => {
+  const start = (currentPage.value - 1) * pageSize.value
+  return filteredTasks.value.slice(start, start + pageSize.value)
+})
+
+// 翻页（边界夹紧）
+const goToPage = (page: number) => {
+  currentPage.value = Math.min(Math.max(1, page), totalPages.value)
+}
+
+// 筛选条件或排序变化时回到第 1 页，避免停留在越界页码
+watch([filter, searchKeyword, () => settingsStore.settings.taskSortOrder], () => {
+  currentPage.value = 1
+})
+
+// 删除任务/实时刷新导致总页数收缩时，自动夹紧越界的当前页
+watch(totalPages, (tp) => {
+  if (currentPage.value > tp) {
+    currentPage.value = tp
+  }
+})
+
 const toggleSortOrder = async () => {
   const newOrder = settingsStore.settings.taskSortOrder === 'desc' ? 'asc' : 'desc'
   await settingsStore.saveSettings({
@@ -377,6 +417,10 @@ const getStatusColor = (status: Task['status']) => {
       return 'text-blue-600 bg-blue-100'
     case 'merging':
       return 'text-purple-600 bg-purple-100'
+    case 'compressing':
+      return 'text-orange-600 bg-orange-100'
+    case 'packing':
+      return 'text-indigo-600 bg-indigo-100'
     case 'uploading':
       return 'text-blue-600 bg-blue-100'
     case 'paused':
@@ -435,7 +479,7 @@ const formatTime = (seconds: number): string => {
 // 计算预计完成时间
 const getEstimatedTime = (task: Task): string => {
   const status = task.status
-  if (status === 'completed' || status === 'failed' || status === 'pending' || status === 'paused') {
+  if (status === 'completed' || status === 'failed' || status === 'pending' || status === 'paused' || status === 'compressing' || status === 'packing') {
     return ''
   }
   
@@ -500,7 +544,7 @@ onUnmounted(() => {
 
       <div class="flex gap-2 mb-4 overflow-x-auto pb-2">
         <button
-          v-for="f in ['all', 'pending', 'downloading', 'merging', 'uploading', 'paused', 'completed', 'failed']"
+          v-for="f in ['all', 'pending', 'downloading', 'merging', 'compressing', 'packing', 'uploading', 'paused', 'completed', 'failed']"
           :key="f"
           @click="filter = f as any"
           class="px-4 py-2 rounded-lg text-sm font-medium transition-colors whitespace-nowrap"
@@ -513,7 +557,9 @@ onUnmounted(() => {
             f === 'pending' ? '等待中' :
             f === 'downloading' ? '下载中' : 
             f === 'merging' ? '合并中' :
-            f === 'uploading' ? '上传中' : 
+            f === 'compressing' ? '压缩中' :
+            f === 'packing' ? '分片中' :
+            f === 'uploading' ? '上传中' :
             f === 'paused' ? '已暂停' :
             f === 'completed' ? '已完成' : 
             '失败' 
@@ -544,7 +590,7 @@ onUnmounted(() => {
 
       <div v-else class="space-y-4">
         <div
-          v-for="task in filteredTasks"
+          v-for="task in pagedTasks"
           :key="task.id"
           class="card hover:shadow-md transition-all"
         >
@@ -566,6 +612,8 @@ onUnmounted(() => {
                   task.status === 'pending' ? '等待队列' :
                   task.status === 'downloading' ? '正在下载' :
                   task.status === 'merging' ? '正在合并' :
+                  task.status === 'compressing' ? '正在压缩' :
+                  task.status === 'packing' ? '正在分片' :
                   task.status === 'uploading' ? '正在上传' :
                   task.status === 'paused' ? '已暂停' :
                   task.status === 'completed' ? '已完成' :
@@ -591,7 +639,23 @@ onUnmounted(() => {
                 </svg>
               </button>
               <button
-                v-if="task.status === 'downloading' || task.status === 'uploading' || task.status === 'paused'"
+                v-if="isTaskRunning(task)"
+                @click="downloadStore.pauseTaskById(task.id)"
+                class="p-2 text-gray-500 hover:text-amber-500 transition-colors"
+                title="暂停任务"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg>
+              </button>
+              <button
+                v-if="task.status === 'paused'"
+                @click="downloadStore.resumeTaskById(task.id)"
+                class="p-2 text-gray-500 hover:text-green-500 transition-colors"
+                title="继续任务"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="6 3 20 12 6 21 6 3"/></svg>
+              </button>
+              <button
+                v-if="isTaskRunning(task) || task.status === 'paused'"
                 @click="downloadStore.stopDownloadById(task.id)"
                 class="p-2 text-gray-500 hover:text-red-500 transition-colors"
                 title="停止任务"
@@ -619,7 +683,7 @@ onUnmounted(() => {
             </div>
           </div>
 
-          <div v-if="task.status === 'downloading' || task.status === 'merging' || task.status === 'uploading' || task.status === 'paused'" class="mb-3">
+          <div v-if="isTaskRunning(task) || task.status === 'paused'" class="mb-3">
             <div class="flex justify-between text-xs text-gray-500 mb-1">
                 <span v-if="(task.status === 'downloading' || task.status === 'merging') && task.url?.toLowerCase().includes('.m3u8')">
                   {{ task.downloadedSegments }} / {{ task.totalSegments }} 片段
@@ -651,6 +715,45 @@ onUnmounted(() => {
           <div v-if="task.error" class="mt-2 text-xs flex justify-between items-center">
             <span class="text-red-500">{{ task.error }}</span>
             <span v-if="getEstimatedTime(task)" class="text-green-600">预计 {{ getEstimatedTime(task) }} 完成</span>
+          </div>
+        </div>
+
+        <!-- 分页控件：总数超过单页时显示 -->
+        <div v-if="totalPages > 1" class="flex flex-wrap items-center justify-between gap-3 pt-2">
+          <div class="text-xs text-gray-500">
+            共 {{ filteredTasks.length }} 条 · 第 {{ currentPage }} / {{ totalPages }} 页
+          </div>
+
+          <div class="flex items-center gap-2">
+            <label class="text-xs text-gray-500">每页</label>
+            <select
+              v-model.number="pageSize"
+              class="rounded-lg border border-gray-300 bg-white px-2 py-1 text-xs text-gray-700 focus:border-primary focus:outline-none dark:border-gray-600 dark:bg-gray-700 dark:text-gray-200"
+              @change="currentPage = 1"
+            >
+              <option v-for="size in PAGE_SIZE_OPTIONS" :key="size" :value="size">{{ size }}</option>
+            </select>
+
+            <button
+              class="rounded-lg border border-gray-300 px-3 py-1 text-xs text-gray-600 transition-colors hover:border-primary hover:text-primary disabled:cursor-not-allowed disabled:opacity-40 dark:border-gray-600 dark:text-gray-300"
+              :disabled="currentPage <= 1"
+              @click="goToPage(1)"
+            >首页</button>
+            <button
+              class="rounded-lg border border-gray-300 px-3 py-1 text-xs text-gray-600 transition-colors hover:border-primary hover:text-primary disabled:cursor-not-allowed disabled:opacity-40 dark:border-gray-600 dark:text-gray-300"
+              :disabled="currentPage <= 1"
+              @click="goToPage(currentPage - 1)"
+            >上一页</button>
+            <button
+              class="rounded-lg border border-gray-300 px-3 py-1 text-xs text-gray-600 transition-colors hover:border-primary hover:text-primary disabled:cursor-not-allowed disabled:opacity-40 dark:border-gray-600 dark:text-gray-300"
+              :disabled="currentPage >= totalPages"
+              @click="goToPage(currentPage + 1)"
+            >下一页</button>
+            <button
+              class="rounded-lg border border-gray-300 px-3 py-1 text-xs text-gray-600 transition-colors hover:border-primary hover:text-primary disabled:cursor-not-allowed disabled:opacity-40 dark:border-gray-600 dark:text-gray-300"
+              :disabled="currentPage >= totalPages"
+              @click="goToPage(totalPages)"
+            >末页</button>
           </div>
         </div>
       </div>

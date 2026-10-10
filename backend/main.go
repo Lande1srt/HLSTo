@@ -75,6 +75,8 @@ func main() {
 		downloaderService.UpdateConcurrencyConfig(
 			persisted.DownloadConcurrency,
 			persisted.MergeConcurrency,
+			persisted.CompressConcurrency,
+			persisted.PackConcurrency,
 			persisted.UploadConcurrency,
 			persisted.SingleMode,
 		)

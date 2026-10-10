@@ -6,7 +6,7 @@ export interface Task {
   id: string
   url: string
   name: string
-  status: 'pending' | 'downloading' | 'merging' | 'uploading' | 'completed' | 'failed' | 'paused'
+  status: 'pending' | 'downloading' | 'merging' | 'compressing' | 'packing' | 'uploading' | 'completed' | 'failed' | 'paused'
   progress: number
   speed: string
   totalSegments: number
@@ -262,6 +262,34 @@ export const useDownloadStore = defineStore('download', () => {
     }
   }
 
+  const pauseTaskById = async (taskId: string) => {
+    try {
+      await downloadAPI.pause(taskId)
+      if (currentTask.value?.id === taskId) {
+        currentTask.value.status = 'paused'
+        isDownloading.value = false
+      }
+      addLog('info', `任务 ${taskId} 已暂停`)
+    } catch (error: unknown) {
+      const err = error as { response?: { data?: { message?: string } }; message?: string }
+      addLog('error', err.response?.data?.message || err.message || '暂停失败')
+    }
+  }
+
+  const resumeTaskById = async (taskId: string) => {
+    try {
+      await downloadAPI.resume(taskId)
+      if (currentTask.value?.id === taskId) {
+        currentTask.value.status = 'downloading'
+        isDownloading.value = true
+      }
+      addLog('info', `任务 ${taskId} 已恢复`)
+    } catch (error: unknown) {
+      const err = error as { response?: { data?: { message?: string } }; message?: string }
+      addLog('error', err.response?.data?.message || err.message || '恢复失败')
+    }
+  }
+
   const analyzeM3U8 = async (url: string, referer?: string, cookie?: string) => {
     try {
       addLog('info', `正在分析链接: ${url}`)
@@ -308,6 +336,8 @@ export const useDownloadStore = defineStore('download', () => {
     retryUpload,
     stopDownload,
     stopDownloadById,
+    pauseTaskById,
+    resumeTaskById,
     reset,
     analyzeM3U8,
     uploadTask

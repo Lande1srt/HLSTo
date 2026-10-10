@@ -62,3 +62,6 @@ ffmpeg/
 
 # 指定密钥下载缓存（运行时生成）
 hlskeys/
+/backend/movie
+/backend/keys
+*.m3u8

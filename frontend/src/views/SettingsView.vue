@@ -175,6 +175,8 @@ const createDefaultSettings = (): Settings => ({
   defaultReferer: '',
   downloadConcurrency: 1,
   mergeConcurrency: 1,
+  compressConcurrency: 1,
+  packConcurrency: 1,
   uploadConcurrency: 1,
   singleMode: false,
   enablePreDownloadCheck: true,
@@ -543,6 +545,15 @@ const save = async () => {
   if (!Number.isFinite(settings.value.compressTargetBitrate) || settings.value.compressTargetBitrate < 0) {
     settings.value.compressTargetBitrate = 0
   }
+
+  // 各阶段并发数合法化：非有限值或 <1（空输入/0/负数）时兜底为 1
+  const clampConcurrency = (v: number): number =>
+    Number.isFinite(v) && v >= 1 ? Math.floor(v) : 1
+  settings.value.downloadConcurrency = clampConcurrency(settings.value.downloadConcurrency)
+  settings.value.mergeConcurrency = clampConcurrency(settings.value.mergeConcurrency)
+  settings.value.compressConcurrency = clampConcurrency(settings.value.compressConcurrency)
+  settings.value.packConcurrency = clampConcurrency(settings.value.packConcurrency)
+  settings.value.uploadConcurrency = clampConcurrency(settings.value.uploadConcurrency)
 
   try {
     const success = await settingsStore.saveSettings(settings.value)
@@ -1159,10 +1170,10 @@ const reset = () => {
           </div>
 
           <p class="text-xs text-gray-500 mb-2" v-if="settings.singleMode">
-            单状态模式：同时只能存在一个任务处于下载/合并/上传状态，适用于磁盘空间较小的服务器，避免同时下载文件造成空间不足。
+            单状态模式：同时只能存在一个任务处于下载/合并/压缩/分片/上传状态，适用于磁盘空间较小的服务器，避免同时下载文件造成空间不足。
           </p>
 
-          <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-4">
             <div>
               <label class="block text-sm font-medium text-gray-600 mb-2">同时下载数量</label>
               <input
@@ -1184,6 +1195,26 @@ const reset = () => {
               />
             </div>
             <div>
+              <label class="block text-sm font-medium text-gray-600 mb-2" title="FFmpeg 码率压缩，CPU 密集，建议保持 1">同时压缩数量</label>
+              <input
+                v-model.number="settings.compressConcurrency"
+                type="number"
+                min="1"
+                max="10"
+                class="input-field"
+              />
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-600 mb-2" title="FFmpeg 二次 HLS 分片，CPU/IO 密集，建议保持 1">同时分片数量</label>
+              <input
+                v-model.number="settings.packConcurrency"
+                type="number"
+                min="1"
+                max="10"
+                class="input-field"
+              />
+            </div>
+            <div>
               <label class="block text-sm font-medium text-gray-600 mb-2">同时上传数量</label>
               <input
                 v-model.number="settings.uploadConcurrency"
@@ -1196,7 +1227,7 @@ const reset = () => {
           </div>
 
           <p class="text-xs text-gray-500 mt-2">
-            设置每种任务状态的最大并发数。启用单状态处理模式后，此设置将被忽略。
+            设置每个处理阶段的最大并发数。其中「压缩」「分片」依赖 FFmpeg、CPU 消耗高，建议保持为 1，避免多个任务同时转码导致整体变慢，也可防止多任务合并占用过多磁盘空间。启用单状态处理模式后，此设置将被忽略。
           </p>
         </div>
 

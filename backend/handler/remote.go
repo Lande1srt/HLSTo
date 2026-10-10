@@ -245,6 +245,8 @@ func (h *RemoteHandler) SaveSettings(w http.ResponseWriter, r *http.Request) {
 		h.downloaderService.UpdateConcurrencyConfig(
 			newSettings.DownloadConcurrency,
 			newSettings.MergeConcurrency,
+			newSettings.CompressConcurrency,
+			newSettings.PackConcurrency,
 			newSettings.UploadConcurrency,
 			newSettings.SingleMode,
 		)

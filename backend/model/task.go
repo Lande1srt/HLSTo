@@ -10,6 +10,8 @@ const (
 	StatusPending     TaskStatus = "pending"
 	StatusDownloading TaskStatus = "downloading"
 	StatusMerging     TaskStatus = "merging"
+	StatusCompressing TaskStatus = "compressing" // 码率压缩（FFmpeg 转码，CPU 密集）
+	StatusPacking     TaskStatus = "packing"     // 二次 HLS 分片（FFmpeg，CPU 密集）
 	StatusPaused      TaskStatus = "paused"
 	StatusUploading   TaskStatus = "uploading"
 	StatusCompleted   TaskStatus = "completed"
@@ -228,6 +230,8 @@ type WebDAVSettings struct {
 type QueueSettings struct {
 	DownloadConcurrency int  `json:"downloadConcurrency"`
 	MergeConcurrency    int  `json:"mergeConcurrency"`
+	CompressConcurrency int  `json:"compressConcurrency"`
+	PackConcurrency     int  `json:"packConcurrency"`
 	UploadConcurrency   int  `json:"uploadConcurrency"`
 	SingleMode          bool `json:"singleMode"`
 }

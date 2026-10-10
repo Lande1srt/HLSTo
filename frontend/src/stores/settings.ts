@@ -18,6 +18,8 @@ export interface Settings {
   defaultReferer: string
   downloadConcurrency: number
   mergeConcurrency: number
+  compressConcurrency: number
+  packConcurrency: number
   uploadConcurrency: number
   singleMode: boolean
   enablePreDownloadCheck: boolean
@@ -56,6 +58,8 @@ export const useSettingsStore = defineStore('settings', () => {
     defaultReferer: '',
     downloadConcurrency: 1,
     mergeConcurrency: 1,
+    compressConcurrency: 1,
+    packConcurrency: 1,
     uploadConcurrency: 1,
     singleMode: false,
     enablePreDownloadCheck: true,

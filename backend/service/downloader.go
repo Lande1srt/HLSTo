@@ -156,11 +156,15 @@ type DownloaderService struct {
 
 	downloadSem atomic.Pointer[semaphore]
 	mergeSem    atomic.Pointer[semaphore]
+	compressSem atomic.Pointer[semaphore] // 码率压缩（CPU 密集，默认串行）
+	packSem     atomic.Pointer[semaphore] // 二次 HLS 分片（CPU 密集，默认串行）
 	uploadSem   atomic.Pointer[semaphore]
 
 	// 配置
 	downloadConcurrency atomic.Int32
 	mergeConcurrency    atomic.Int32
+	compressConcurrency atomic.Int32
+	packConcurrency     atomic.Int32
 	uploadConcurrency   atomic.Int32
 	singleMode          atomic.Bool
 	singleSem           chan struct{} // 单状态模式下的全局信号量
@@ -194,11 +198,15 @@ func NewDownloaderService(taskManager *TaskManager, wsManager *websocket.WebSock
 	// 初始化原子指针
 	ds.downloadSem.Store(newSemaphore(1))
 	ds.mergeSem.Store(newSemaphore(1))
+	ds.compressSem.Store(newSemaphore(1))
+	ds.packSem.Store(newSemaphore(1))
 	ds.uploadSem.Store(newSemaphore(1))
 
 	// 初始化配置
 	ds.downloadConcurrency.Store(1)
 	ds.mergeConcurrency.Store(1)
+	ds.compressConcurrency.Store(1)
+	ds.packConcurrency.Store(1)
 	ds.uploadConcurrency.Store(1)
 	ds.singleMode.Store(false)
 
@@ -324,13 +332,19 @@ func (ds *DownloaderService) getHLSPackForm() string {
 	return model.HLSPackFormMulti
 }
 
-func (ds *DownloaderService) UpdateConcurrencyConfig(download, merge, upload int, singleMode bool) {
+func (ds *DownloaderService) UpdateConcurrencyConfig(download, merge, compress, pack, upload int, singleMode bool) {
 	// 非法值兜底，防止 0/负数导致无缓冲信号量永久阻塞
 	if download < 1 {
 		download = 1
 	}
 	if merge < 1 {
 		merge = 1
+	}
+	if compress < 1 {
+		compress = 1
+	}
+	if pack < 1 {
+		pack = 1
 	}
 	if upload < 1 {
 		upload = 1
@@ -339,6 +353,8 @@ func (ds *DownloaderService) UpdateConcurrencyConfig(download, merge, upload int
 	// 使用原子操作更新配置
 	ds.downloadConcurrency.Store(int32(download))
 	ds.mergeConcurrency.Store(int32(merge))
+	ds.compressConcurrency.Store(int32(compress))
+	ds.packConcurrency.Store(int32(pack))
 	ds.uploadConcurrency.Store(int32(upload))
 	ds.singleMode.Store(singleMode)
 
@@ -346,10 +362,12 @@ func (ds *DownloaderService) UpdateConcurrencyConfig(download, merge, upload int
 	// 扩容立即唤醒等待者，缩容不影响已占用许可
 	ds.downloadSem.Load().resize(download)
 	ds.mergeSem.Load().resize(merge)
+	ds.compressSem.Load().resize(compress)
+	ds.packSem.Load().resize(pack)
 	ds.uploadSem.Load().resize(upload)
 
-	log.Printf("[Downloader] 并发配置已更新: 下载=%d, 合并=%d, 上传=%d, 单模式=%v\n",
-		download, merge, upload, singleMode)
+	log.Printf("[Downloader] 并发配置已更新: 下载=%d, 合并=%d, 压缩=%d, 分片=%d, 上传=%d, 单模式=%v\n",
+		download, merge, compress, pack, upload, singleMode)
 }
 
 func (ds *DownloaderService) getControl(taskID string) (*taskControl, bool) {
@@ -558,6 +576,11 @@ func (ds *DownloaderService) download(taskID string, req model.DownloadRequest) 
 			return
 		}
 
+		// 暂停关卡：下载结束、进入合并前。被停止则直接退出
+		if !waitIfPaused(ctrl) {
+			return
+		}
+
 		// --- 阶段 2: 合并 ---
 		ds.sendStatus(taskID, model.StatusMerging, "正在等待合并队列...")
 		ds.sendProgress(taskID, 0, "等待队列", 0, 0)
@@ -633,6 +656,11 @@ func (ds *DownloaderService) download(taskID string, req model.DownloadRequest) 
 	}
 	ds.taskManager.mu.Unlock()
 
+	// 暂停关卡：合并结束、进入压缩前。被停止则直接退出
+	if !waitIfPaused(ctrl) {
+		return
+	}
+
 	// --- 阶段 2.4: 高码率压缩（可选，依赖 FFmpeg；在 HLS 分片/上传之前）---
 	mv, compressOK, compressStopped := ds.compressIfHighBitrate(taskID, mv, ctrl)
 	if compressStopped {
@@ -651,6 +679,11 @@ func (ds *DownloaderService) download(taskID string, req model.DownloadRequest) 
 	// --- 阶段 2.5: 二次 HLS 分片（可选，依赖 FFmpeg）---
 	hlsDir := ""
 	if ds.hlsPackEnabled.Load() {
+		// 暂停关卡：压缩结束、进入二次分片前。被停止则直接退出
+		if !waitIfPaused(ctrl) {
+			return
+		}
+
 		var packOK bool
 		hlsDir, packOK = ds.packageAsHLS(taskID, mv, downloadDir, req.OutputName,
 			ds.hlsEncryptEnabled.Load(), ds.getHLSEncryptMode(), ds.getHLSKeyURL(),
@@ -662,6 +695,11 @@ func (ds *DownloaderService) download(taskID string, req model.DownloadRequest) 
 
 	// --- 阶段 3: 上传 ---
 	if req.EnableWebDAV && req.WebDAVURL != "" {
+		// 暂停关卡：分片结束、进入上传前。被停止则直接退出
+		if !waitIfPaused(ctrl) {
+			return
+		}
+
 		ds.sendStatus(taskID, model.StatusUploading, "正在等待上传队列...")
 
 		// 获取当前的上传信号量（使用原子指针）
@@ -1442,6 +1480,19 @@ func (ds *DownloaderService) compressIfHighBitrate(taskID, inputPath string,
 		return inputPath, true, false
 	}
 
+	// 需要压缩：进入压缩队列（CPU 密集，默认串行，避免多个转码并发抢占 CPU）
+	ds.sendStatus(taskID, model.StatusCompressing, "正在等待压缩队列...")
+	compressSem := ds.compressSem.Load()
+	if !compressSem.acquire(ctrl.stopped) {
+		return inputPath, false, true
+	}
+	compressSlotReleased := false
+	defer func() {
+		if !compressSlotReleased {
+			compressSem.release()
+		}
+	}()
+
 	// 目标视频码率：显式配置优先，否则取阈值
 	target := int(ds.compressTargetKbps.Load())
 	if target < 1 {
@@ -1451,9 +1502,19 @@ func (ds *DownloaderService) compressIfHighBitrate(taskID, inputPath string,
 		target = threshold
 	}
 
-	ds.sendStatus(taskID, model.StatusMerging,
+	// 记录原文件大小，用于压缩前后体积对比日志
+	origSize := int64(-1)
+	if origFi, err := os.Stat(inputPath); err == nil {
+		origSize = origFi.Size()
+	}
+
+	ds.sendStatus(taskID, model.StatusCompressing,
 		fmt.Sprintf("码率超阈值，正在压缩至约 %dkbps...", target))
-	ds.sendLog(taskID, "info", fmt.Sprintf("开始压缩：%dkbps -> 目标 %dkbps", curKbps, target))
+	sizePart := ""
+	if origSize >= 0 {
+		sizePart = fmt.Sprintf("，原文件大小 %s", humanBytes(origSize))
+	}
+	ds.sendLog(taskID, "info", fmt.Sprintf("开始压缩：%dkbps -> 目标 %dkbps%s", curKbps, target, sizePart))
 
 	tmpPath := strings.TrimSuffix(inputPath, filepath.Ext(inputPath)) + ".compress.mp4"
 
@@ -1518,7 +1579,13 @@ func (ds *DownloaderService) compressIfHighBitrate(taskID, inputPath string,
 		return inputPath, false, false
 	}
 
-	ds.sendLog(taskID, "info", fmt.Sprintf("压缩完成：%dkbps -> %dkbps", curKbps, newKbps))
+	completeMsg := fmt.Sprintf("压缩完成：码率 %dkbps -> %dkbps，文件大小 %s -> %s",
+		curKbps, newKbps, humanBytes(origSize), humanBytes(fi.Size()))
+	if origSize > 0 {
+		completeMsg += fmt.Sprintf("（减小约 %.0f%%）",
+			(1-float64(fi.Size())/float64(origSize))*100)
+	}
+	ds.sendLog(taskID, "info", completeMsg)
 	return inputPath, true, false
 }
 
@@ -2146,6 +2213,14 @@ func (ds *DownloaderService) packageAsHLS(taskID, inputPath, downloadDir, output
 		return "", false
 	}
 
+	// 进入分片队列（CPU/IO 密集，默认串行，避免与其他转码/分片并发抢占资源与磁盘空间）
+	ds.sendStatus(taskID, model.StatusPacking, "正在等待分片队列...")
+	packSem := ds.packSem.Load()
+	if !packSem.acquire(ctrl.stopped) {
+		return "", false
+	}
+	defer packSem.release()
+
 	hlsDir = filepath.Join(downloadDir, outputName+"_hls")
 	// 重试场景：清理旧产物后重建
 	if err := os.RemoveAll(hlsDir); err != nil {
@@ -2160,7 +2235,7 @@ func (ds *DownloaderService) packageAsHLS(taskID, inputPath, downloadDir, output
 	if encryptEnabled {
 		stageMsg = "正在加密分片 HLS（AES-128）..."
 	}
-	ds.sendStatus(taskID, model.StatusMerging, stageMsg)
+	ds.sendStatus(taskID, model.StatusPacking, stageMsg)
 	ds.sendLog(taskID, "info", stageMsg)
 
 	// 准备密钥并生成 ffmpeg hls_key_info_file（两行：m3u8 中的密钥URI / 本地密钥路径）。
@@ -2176,12 +2251,21 @@ func (ds *DownloaderService) packageAsHLS(taskID, inputPath, downloadDir, output
 		}
 		taskKeyPath = keyPath
 		keyInfoPath = filepath.Join(hlsDir, "keyinfo.txt")
-		content := fmt.Sprintf("%s\n%s\n", hlsKeyFileName, filepath.ToSlash(keyPath))
+		// 随机 IV：作为 hls_key_info_file 第三行，FFmpeg 据此 IV 加密并在 EXT-X-KEY 输出，
+		// 避免默认使用媒体序列号（第 0 片为全零）导致的可预测 IV。
+		ivHex, err := randomHLSIV()
+		if err != nil {
+			os.RemoveAll(hlsDir)
+			ds.sendStatus(taskID, model.StatusFailed, err.Error())
+			return "", false
+		}
+		content := fmt.Sprintf("%s\n%s\n%s\n", hlsKeyFileName, filepath.ToSlash(keyPath), ivHex)
 		if err := os.WriteFile(keyInfoPath, []byte(content), 0o644); err != nil {
 			os.RemoveAll(hlsDir)
 			ds.sendStatus(taskID, model.StatusFailed, fmt.Sprintf("写入密钥信息失败: %v", err))
 			return "", false
 		}
+		ds.sendLog(taskID, "info", fmt.Sprintf("已生成随机加密 IV: 0x%s", ivHex))
 	}
 
 	indexPath := filepath.Join(hlsDir, "index.m3u8")
@@ -2495,6 +2579,16 @@ func prepareHLSKey(taskID, mode, keyURL string) (string, error) {
 	return defaultKeyStore.put(taskID, data, fileName)
 }
 
+// randomHLSIV 用 crypto/rand 生成 16 字节随机 IV，返回小写十六进制字符串（32 个字符，
+// 不带 0x 前缀），用于写入 FFmpeg hls_key_info_file 的第三行。
+func randomHLSIV() (string, error) {
+	iv := make([]byte, 16)
+	if _, err := rand.Read(iv); err != nil {
+		return "", fmt.Errorf("生成随机 IV 失败: %w", err)
+	}
+	return hex.EncodeToString(iv), nil
+}
+
 // resolveSpecifiedKey 下载指定 URL 的 HLS 密钥（必须为 16 字节），
 // 缓存于 {工作目录}/hlskeys/{URL哈希}-{时间戳}.key；相同 URL 已存在缓存则直接复用。
 func resolveSpecifiedKey(rawURL string) (string, error) {
@@ -2729,6 +2823,46 @@ func isControlStopped(ctrl *taskControl) bool {
 	default:
 		return false
 	}
+}
+
+// waitIfPaused 在各阶段切换处提供暂停关卡：若任务已暂停则在此阻塞，直到被恢复或停止。
+// 这样可在下载/合并/压缩/分片/上传阶段之间严格停顿，避免暂停后任务仍冲入下一阶段。
+// 注意：不打断正在运行的 FFmpeg 子进程（避免浪费已耗 CPU），转码结束后到达本关卡再挂起。
+// 返回 true 表示可以继续，false 表示任务已被停止（应直接退出，由 defer 负责清理与释放）。
+func waitIfPaused(ctrl *taskControl) bool {
+	if ctrl == nil {
+		return true
+	}
+	select {
+	case <-ctrl.stopped:
+		return false
+	case <-ctrl.paused:
+		select {
+		case <-ctrl.resumed:
+			return true
+		case <-ctrl.stopped:
+			return false
+		}
+	default:
+		return true
+	}
+}
+
+// humanBytes 将字节数格式化为人类可读的 B/KB/MB/GB 字符串（保留两位小数）
+func humanBytes(n int64) string {
+	if n < 0 {
+		return "-"
+	}
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for v := n / unit; v >= unit; v /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.2f %cB", float64(n)/float64(div), "KMGTPE"[exp])
 }
 
 // tailString 返回字符串末尾最多 n 个字节，用于日志截断
