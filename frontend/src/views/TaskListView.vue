@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, watch, nextTick, onMounted, onUnmounted, computed } from 'vue'
 import { taskAPI, settingsAPI, saveBlob } from '@/api'
+import { buildWsUrl } from '@/api/runtime'
 import { useDownloadStore } from '@/stores/download'
 import { useSettingsStore } from '@/stores/settings'
 import WebDAVBrowser from './WebDAVBrowser.vue'
@@ -9,7 +10,39 @@ import type { Task } from '@/stores/download'
 const downloadStore = useDownloadStore()
 const settingsStore = useSettingsStore()
 const tasks = ref<Task[]>([])
-const filter = ref<'all' | 'pending' | 'downloading' | 'merging' | 'compressing' | 'packing' | 'uploading' | 'completed' | 'failed' | 'paused'>('all')
+type TaskFilter = 'all' | 'pending' | 'downloading' | 'merging' | 'compressing' | 'packing' | 'uploading' | 'completed' | 'failed' | 'paused'
+const filter = ref<TaskFilter>('all')
+// 状态筛选项（桌面端按钮组、移动端下拉框共用）
+const FILTER_OPTIONS: { value: TaskFilter; label: string }[] = [
+  { value: 'all', label: '全部' },
+  { value: 'pending', label: '等待中' },
+  { value: 'downloading', label: '下载中' },
+  { value: 'merging', label: '合并中' },
+  { value: 'compressing', label: '压缩中' },
+  { value: 'packing', label: '分片中' },
+  { value: 'uploading', label: '上传中' },
+  { value: 'paused', label: '已暂停' },
+  { value: 'completed', label: '已完成' },
+  { value: 'failed', label: '失败' }
+]
+// 当前筛选中文标签（自定义下拉触发器显示）
+const currentFilterLabel = computed(
+  () => FILTER_OPTIONS.find(f => f.value === filter.value)?.label ?? '全部'
+)
+// 移动端自定义筛选下拉
+const filterDropdownOpen = ref(false)
+const filterSelectEl = ref<HTMLElement | null>(null)
+const selectFilter = (value: TaskFilter) => {
+  filter.value = value
+  filterDropdownOpen.value = false
+}
+// 点击组件外部时收起下拉
+const onFilterDocClick = (e: MouseEvent) => {
+  const el = filterSelectEl.value
+  if (el && !el.contains(e.target as Node)) {
+    filterDropdownOpen.value = false
+  }
+}
 const searchKeyword = ref('')
 const loading = ref(false)
 const ws = ref<WebSocket | null>(null)
@@ -98,31 +131,68 @@ const onDirSelect = (path: string) => {
 
 const wsRetryTimer = ref<number | null>(null)
 
+// 高频 progress 消息做"按帧合批"：多个任务、每条消息只写入暂存，
+// 在下一个微任务/动画帧统一落盘到响应式数组，避免每秒数十次触发
+// filteredTasks 全量 filter+sort 与整页卡片重渲染导致卡顿。
+const pendingProgress = new Map<string, Partial<Task>>()
+let progressFlushScheduled = false
+
+const scheduleProgressFlush = () => {
+  if (progressFlushScheduled) return
+  progressFlushScheduled = true
+  // queueMicroTask 会在同一秒内仍可能多次；用 rAF 对齐浏览器绘制节奏（约每帧一次）
+  const raf = window.requestAnimationFrame || ((cb: FrameRequestCallback) => window.setTimeout(() => cb(performance.now()), 50))
+  raf(() => {
+    progressFlushScheduled = false
+    if (pendingProgress.size === 0) return
+    pendingProgress.forEach((patch, id) => {
+      const task = taskIndex.value.get(id)
+      if (task) Object.assign(task, patch)
+    })
+    pendingProgress.clear()
+  })
+}
+
+// taskIndex: id -> 任务对象的索引，WS 命中 O(1)，替代 findIndex 的 O(N) 扫描
+const taskIndex = computed(() => {
+  const map = new Map<string, Task>()
+  for (const t of tasks.value) map.set(t.id, t)
+  return map
+})
+
 const connectGlobalWebSocket = () => {
   if (ws.value) {
     ws.value.close()
   }
 
-  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-  const wsUrl = `${protocol}//${window.location.host}/ws`
+  const wsUrl = buildWsUrl('/ws')
 
   ws.value = new WebSocket(wsUrl)
 
   ws.value.onmessage = (event) => {
     try {
       const data = JSON.parse(event.data)
-      const taskIndex = tasks.value.findIndex(t => t.id === data.taskId)
-      
-      if (taskIndex !== -1) {
-        const task = tasks.value[taskIndex]
+
+      // status / 未知新任务才需要走索引查找；progress 走合批
+      if (data.type === 'progress') {
+        const prev = pendingProgress.get(data.taskId) || {}
+        pendingProgress.set(data.taskId, {
+          ...prev,
+          progress: data.progress,
+          speed: data.speed,
+          downloadedSegments: data.downloadedSegments,
+          totalSegments: data.totalSegments
+        })
+        scheduleProgressFlush()
+        return
+      }
+
+      const task = taskIndex.value.get(data.taskId)
+      if (task) {
         switch (data.type) {
-          case 'progress':
-            task.progress = data.progress
-            task.speed = data.speed
-            task.downloadedSegments = data.downloadedSegments
-            task.totalSegments = data.totalSegments
-            break
           case 'status':
+            // 立即刷出可能积压的同任务进度，保证完成/失败时显示最终态
+            pendingProgress.delete(data.taskId)
             task.status = data.status
             task.error = data.message || ''
             if (data.status === 'completed' && data.outputPath) {
@@ -149,7 +219,7 @@ const connectGlobalWebSocket = () => {
         loadTasks()
       }
     } catch (error) {
-      console.error('Global WebSocket error:', error)
+      console.error('Global WebSocket message error:', error)
     }
   }
 
@@ -160,6 +230,75 @@ const connectGlobalWebSocket = () => {
       connectGlobalWebSocket()
     }, 5000)
   }
+}
+
+// ============ 轻量全量兜底刷新 ============
+// WS 正常时进度已实时；该轮询只解决 WS 丢消息/状态漂移，10 秒一次、
+// 仅在存在活跃任务时发起、且手动刷新进行中则跳过，避免任务过多时的无谓请求与重渲染。
+const ACTIVE_STATUSES: Task['status'][] = ['pending', 'downloading', 'merging', 'compressing', 'packing', 'uploading', 'paused']
+let fullRefreshTimer: number | null = null
+let fullRefreshing = false
+
+const silentRefreshTasks = async () => {
+  if (fullRefreshing) return
+  // 没有活跃任务则不请求
+  const hasActive = tasks.value.some(t => ACTIVE_STATUSES.includes(t.status))
+  if (!hasActive) return
+  fullRefreshing = true
+  try {
+    const response = await taskAPI.list()
+    if (response.data?.code === 200) {
+      // 先刷出合批中的进度，避免全量数据覆盖为稍旧的值
+      if (pendingProgress.size > 0) {
+        pendingProgress.forEach((patch, id) => {
+          const task = taskIndex.value.get(id)
+          if (task) Object.assign(task, patch)
+        })
+        pendingProgress.clear()
+      }
+      mergeTaskList(response.data.data || [])
+    }
+  } catch (error) {
+    console.error('Failed to silent refresh tasks:', error)
+  } finally {
+    fullRefreshing = false
+  }
+}
+
+// mergeTaskList 增量合并：保留已有对象引用（WS 已在其上更新），
+// 仅同步变化字段，避免整组替换导致整页 v-for DOM 重建。
+const mergeTaskList = (list: Task[]) => {
+  const incomingIds = new Set<string>()
+  for (const incoming of list) {
+    incomingIds.add(incoming.id)
+    const existing = taskIndex.value.get(incoming.id)
+    if (existing) {
+      // 进度字段优先信任 WS 合批结果，避免全量响应时序更旧导致回跳
+      existing.status = incoming.status
+      existing.error = incoming.error ?? ''
+      existing.outputPath = incoming.outputPath
+      existing.name = incoming.name
+      existing.url = incoming.url
+      existing.totalSegments = incoming.totalSegments
+      existing.totalBytes = incoming.totalBytes
+      existing.downloadedBytes = incoming.downloadedBytes
+      existing.createdAt = incoming.createdAt
+      existing.keyPath = incoming.keyPath
+      existing.webDAVURL = incoming.webDAVURL
+      // 进度/速度/已下载：全量值更新（WS 间隙的最终一致）
+      existing.progress = incoming.progress
+      existing.speed = incoming.speed
+      existing.downloadedSegments = incoming.downloadedSegments
+    } else {
+      tasks.value.push(incoming)
+    }
+  }
+  // 移除已被后端删除的任务
+  if (tasks.value.length !== list.length) {
+    tasks.value = tasks.value.filter(t => incomingIds.has(t.id))
+  }
+  // 状态可能在刷新间流转（如 downloading -> completed/paused），同步移动端自动展开
+  syncAutoExpand(tasks.value)
 }
 
 onUnmounted(() => {
@@ -180,7 +319,11 @@ const loadTasks = async () => {
     const response = await taskAPI.list()
     const data = response.data
     if (data.code === 200) {
+      // 整体替换后旧对象引用失效，强制让过滤/排序缓存重建
+      filteredCache = null
       tasks.value = data.data || []
+      // 移动端自动展开未完成（非暂停/失败/完成）任务
+      syncAutoExpand(tasks.value)
     }
   } catch (error) {
     console.error('Failed to load tasks:', error)
@@ -319,6 +462,45 @@ const formatLogTime = (ts: string) => {
     `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
 }
 
+// copiedLinkId 记录刚复制的任务，用于短暂的"已复制"反馈
+const copiedLinkId = ref('')
+let copiedTimer: number | null = null
+
+// copyLink 复制任务下载链接；优先 Clipboard API，非安全上下文(如 Wails 自定义协议)降级 execCommand
+const copyLink = async (text: string, id: string) => {
+  if (!text) return
+  let ok = false
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text)
+      ok = true
+    } else {
+      const ta = document.createElement('textarea')
+      ta.value = text
+      ta.style.position = 'fixed'
+      ta.style.opacity = '0'
+      document.body.appendChild(ta)
+      ta.focus()
+      ta.select()
+      ok = document.execCommand('copy')
+      document.body.removeChild(ta)
+    }
+  } catch (err) {
+    console.error('复制链接失败:', err)
+    ok = false
+  }
+  if (ok) {
+    copiedLinkId.value = id
+    if (copiedTimer !== null) window.clearTimeout(copiedTimer)
+    copiedTimer = window.setTimeout(() => {
+      copiedLinkId.value = ''
+      copiedTimer = null
+    }, 1500)
+  } else {
+    alert('复制失败，请长按链接手动复制')
+  }
+}
+
 const deleteTask = async (id: string) => {
   if (!confirm('确定要删除该任务及其记录吗？')) return
   try {
@@ -332,15 +514,42 @@ const deleteTask = async (id: string) => {
   }
 }
 
-const filteredTasks = computed(() => {
+// filteredTasks 结果做指纹缓存：排序/筛选只依赖 status、createdAt、
+// 名称/URL/输出路径与筛选条件，与高频变化的 progress/speed 无关。
+// progress 合批更新时虽然触发依赖收集，但指纹未变，直接复用上次结果，
+// 避免任务量大时每秒多次全量 filter+sort（含 new Date 解析）。
+let filteredCache: {
+  fingerprint: string
+  result: Task[]
+} | null = null
+
+const filteredTasks = computed<Task[]>(() => {
+  const keyword = searchKeyword.value.toLowerCase().trim()
+  const sortOrder = settingsStore.settings.taskSortOrder
+
+  // 指纹：数组长度 + 每条影响排序/筛选的字段（不含 progress 等高频字段）
+  const parts: string[] = [
+    filter.value,
+    keyword,
+    sortOrder,
+    String(tasks.value.length)
+  ]
+  for (const t of tasks.value) {
+    parts.push(`${t.id}|${t.status}|${t.createdAt}|${t.name}|${t.url}|${t.outputPath ?? ''}`)
+  }
+  const fingerprint = parts.join('\n')
+
+  if (filteredCache && filteredCache.fingerprint === fingerprint) {
+    return filteredCache.result
+  }
+
   let result = tasks.value
   if (filter.value !== 'all') {
-    result = result.filter((t: { status: any }) => t.status === filter.value)
+    result = result.filter((t: { status: string }) => t.status === filter.value)
   }
-  
+
   // 搜索过滤
-  if (searchKeyword.value.trim()) {
-    const keyword = searchKeyword.value.toLowerCase().trim()
+  if (keyword) {
     result = result.filter((t: Task) => {
       const name = t.name?.toLowerCase() || ''
       const url = t.url?.toLowerCase() || ''
@@ -348,19 +557,20 @@ const filteredTasks = computed(() => {
       return name.includes(keyword) || url.includes(keyword) || outputPath.includes(keyword)
     })
   }
-  
-  return [...result].sort((a, b) => {
+
+  const sorted = [...result].sort((a, b) => {
     const timeA = new Date(a.createdAt).getTime()
     const timeB = new Date(b.createdAt).getTime()
-    
+
     if (timeA !== timeB) {
-      return settingsStore.settings.taskSortOrder === 'desc' 
-        ? timeB - timeA 
-        : timeA - timeB
+      return sortOrder === 'desc' ? timeB - timeA : timeA - timeB
     }
-    
+
     return a.id.localeCompare(b.id)
   })
+
+  filteredCache = { fingerprint, result: sorted }
+  return sorted
 })
 
 // ============ 前端分页：仅渲染当前页，避免任务过多时页面过长 ============
@@ -379,6 +589,69 @@ const pagedTasks = computed(() => {
   return filteredTasks.value.slice(start, start + pageSize.value)
 })
 
+// ============ 卡片折叠（移动端优先）============
+// 默认收起，仅显示标题与状态；展开后才显示链接、操作按钮、进度等。
+const expandedIds = ref<Set<string>>(new Set())
+const toggleExpand = (id: string) => {
+  const next = new Set(expandedIds.value)
+  if (next.has(id)) next.delete(id)
+  else next.add(id)
+  expandedIds.value = next
+}
+const isExpanded = (id: string) => expandedIds.value.has(id)
+
+// ============ 移动端自动展开未完成任务，便于查看进度 ============
+// 仅窄屏(<=640px)生效；completed/paused/failed 不自动展开。
+// autoExpandedIds 记录"由系统自动展开"的卡片，任务结束时只收起这些；
+// userCollapsedAuto 记录用户手动折叠的活跃任务，后续刷新不再强制展开。
+const MOBILE_AUTO_EXPAND_MAX = 640
+const isMobileView = () =>
+  typeof window !== 'undefined' &&
+  window.matchMedia(`(max-width: ${MOBILE_AUTO_EXPAND_MAX}px)`).matches
+// 需自动展开的状态：等待队列 + 五个执行阶段；排除 paused/completed/failed
+const AUTO_EXPAND_STATUSES: Task['status'][] = ['pending', 'downloading', 'merging', 'compressing', 'packing', 'uploading']
+const autoExpandedIds = new Set<string>()
+const userCollapsedAuto = new Set<string>()
+
+// 依据当前任务状态同步展开集合（移动端）
+const syncAutoExpand = (list: Task[]) => {
+  if (!isMobileView()) return
+  const next = new Set(expandedIds.value)
+  for (const t of list) {
+    const shouldOpen = AUTO_EXPAND_STATUSES.includes(t.status)
+    if (shouldOpen) {
+      // 用户手动折叠过的活跃任务，尊重其选择不自动打开
+      if (!userCollapsedAuto.has(t.id) && !next.has(t.id)) {
+        next.add(t.id)
+        autoExpandedIds.add(t.id)
+      }
+    } else if (autoExpandedIds.has(t.id)) {
+      // 仅收起"由自动展开打开"的卡片；用户手动展开的保持不动
+      next.delete(t.id)
+      autoExpandedIds.delete(t.id)
+      userCollapsedAuto.delete(t.id)
+    }
+  }
+  expandedIds.value = next
+}
+
+// 用户手动切换展开状态时，维护自动/手动标记，避免与自动逻辑冲突
+const onManualToggle = (task: Task) => {
+  const wasOpen = expandedIds.value.has(task.id)
+  if (!wasOpen) {
+    // 手动展开：清除折叠标记，并视为非自动展开
+    userCollapsedAuto.delete(task.id)
+    autoExpandedIds.delete(task.id)
+  } else {
+    // 手动折叠
+    autoExpandedIds.delete(task.id)
+    if (isMobileView() && AUTO_EXPAND_STATUSES.includes(task.status)) {
+      userCollapsedAuto.add(task.id)
+    }
+  }
+  toggleExpand(task.id)
+}
+
 // 翻页（边界夹紧）
 const goToPage = (page: number) => {
   currentPage.value = Math.min(Math.max(1, page), totalPages.value)
@@ -394,6 +667,15 @@ watch(totalPages, (tp) => {
   if (currentPage.value > tp) {
     currentPage.value = tp
   }
+})
+
+// WS 实时状态流转（downloading->completed/paused/failed）时同步移动端自动展开。
+// 仅监听 status 指纹，避免 progress/speed 高频更新反复触发。
+const statusFingerprint = computed(() =>
+  tasks.value.map(t => `${t.id}:${t.status}`).join('|')
+)
+watch(statusFingerprint, () => {
+  syncAutoExpand(tasks.value)
 })
 
 const toggleSortOrder = async () => {
@@ -438,6 +720,26 @@ const formatSize = (kb: number) => {
   if (kb <= 0) return '0 KB'
   if (kb < 1024) return `${kb} KB`
   return `${(kb / 1024).toFixed(1)} MB`
+}
+
+// isM3U8Task 判定是否为 HLS(m3u8) 任务：m3u8 用片段数，普通视频用字节数
+const isM3U8Task = (task: Task) => !!task.url?.toLowerCase().includes('.m3u8')
+
+// getProgressText 统一各状态下的进度主文本：
+//  - m3u8：显示「已下载片段 / 总片段 片段」
+//  - 普通视频：显示「已下载大小 / 总大小」。实时 WS 把 KB 复用在 segments 字段，
+//    而 REST 全量使用 bytes(字节)；优先用 bytes（持久化准确），否则回退 segments(KB)。
+const getProgressText = (task: Task): string => {
+  if (isM3U8Task(task)) {
+    return `${task.downloadedSegments} / ${task.totalSegments} 片段`
+  }
+  const totalKB = task.totalBytes
+    ? task.totalBytes / 1024
+    : task.totalSegments
+  const doneKB = task.downloadedBytes
+    ? task.downloadedBytes / 1024
+    : task.downloadedSegments
+  return `${formatSize(doneKB)} / ${formatSize(totalKB)}`
 }
 
 // 解析速度字符串为 KB/s
@@ -485,16 +787,18 @@ const getEstimatedTime = (task: Task): string => {
   
   const speedKBps = parseSpeed(task.speed)
   if (speedKBps <= 0) return ''
-  
+
   let downloadedKB: number
   let totalKB: number
-  
-  if ((status === 'downloading' || status === 'merging') && task.url?.toLowerCase().includes('.m3u8')) {
+
+  if (isM3U8Task(task)) {
+    // m3u8：片段数，按每片约 512KB 估算
     downloadedKB = task.downloadedSegments * 512
     totalKB = task.totalSegments * 512
   } else {
-    downloadedKB = task.downloadedSegments
-    totalKB = task.totalSegments
+    // 普通视频：优先用持久化字节数(/1024 得 KB)，否则回退 WS 复用的 segments(KB)
+    totalKB = task.totalBytes ? task.totalBytes / 1024 : task.totalSegments
+    downloadedKB = task.downloadedBytes ? task.downloadedBytes / 1024 : task.downloadedSegments
   }
   
   if (totalKB <= 0 || downloadedKB >= totalKB) return ''
@@ -507,10 +811,24 @@ const getEstimatedTime = (task: Task): string => {
   return formatTime(remainingSeconds)
 }
 
+// 跨断点（桌面<->移动、屏幕旋转）时重新同步自动展开
+let mobileMql: MediaQueryList | null = null
+const onMobileBreakpointChange = () => {
+  syncAutoExpand(tasks.value)
+}
+
 onMounted(() => {
   settingsStore.loadSettings()
   loadTasks()
   connectGlobalWebSocket()
+  // 10 秒轻量兜底，仅在有活跃任务时真正发请求
+  fullRefreshTimer = window.setInterval(silentRefreshTasks, 10000)
+  if (typeof window !== 'undefined' && window.matchMedia) {
+    mobileMql = window.matchMedia(`(max-width: ${MOBILE_AUTO_EXPAND_MAX}px)`)
+    mobileMql.addEventListener('change', onMobileBreakpointChange)
+  }
+  // 自定义筛选下拉：点击外部收起
+  document.addEventListener('click', onFilterDocClick)
 })
 
 onUnmounted(() => {
@@ -518,6 +836,15 @@ onUnmounted(() => {
     ws.value.close()
     ws.value = null
   }
+  if (fullRefreshTimer !== null) {
+    window.clearInterval(fullRefreshTimer)
+    fullRefreshTimer = null
+  }
+  if (mobileMql) {
+    mobileMql.removeEventListener('change', onMobileBreakpointChange)
+    mobileMql = null
+  }
+  document.removeEventListener('click', onFilterDocClick)
 })
 </script>
 
@@ -542,29 +869,58 @@ onUnmounted(() => {
         </div>
       </div>
 
-      <div class="flex gap-2 mb-4 overflow-x-auto pb-2">
+      <!-- 桌面端：状态筛选按钮组（可横向滚动） -->
+      <div class="filter-tabs flex gap-2 mb-4 overflow-x-auto pb-2">
         <button
-          v-for="f in ['all', 'pending', 'downloading', 'merging', 'compressing', 'packing', 'uploading', 'paused', 'completed', 'failed']"
-          :key="f"
-          @click="filter = f as any"
+          v-for="f in FILTER_OPTIONS"
+          :key="f.value"
+          @click="filter = f.value"
           class="px-4 py-2 rounded-lg text-sm font-medium transition-colors whitespace-nowrap"
-          :class="filter === f
+          :class="filter === f.value
             ? 'bg-primary text-white'
             : 'bg-gray-200 text-gray-600 hover:bg-gray-300'"
         >
-          {{ 
-            f === 'all' ? '全部' : 
-            f === 'pending' ? '等待中' :
-            f === 'downloading' ? '下载中' : 
-            f === 'merging' ? '合并中' :
-            f === 'compressing' ? '压缩中' :
-            f === 'packing' ? '分片中' :
-            f === 'uploading' ? '上传中' :
-            f === 'paused' ? '已暂停' :
-            f === 'completed' ? '已完成' : 
-            '失败' 
-          }}
+          {{ f.label }}
         </button>
+      </div>
+
+      <!-- 移动端：状态筛选改为自定义下拉框，避免一排按钮左右滑动 -->
+      <div class="filter-select-wrap mb-4">
+        <div class="custom-select" ref="filterSelectEl">
+          <button
+            type="button"
+            class="custom-select-trigger"
+            :class="{ 'is-open': filterDropdownOpen }"
+            aria-haspopup="listbox"
+            :aria-expanded="filterDropdownOpen"
+            @click="filterDropdownOpen = !filterDropdownOpen"
+          >
+            <span class="custom-select-value">{{ currentFilterLabel }}</span>
+            <svg
+              class="custom-select-chevron"
+              :class="{ 'is-open': filterDropdownOpen }"
+              xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+            >
+              <polyline points="6 9 12 15 18 9" />
+            </svg>
+          </button>
+          <transition name="dropdown">
+            <ul v-if="filterDropdownOpen" class="custom-select-menu" role="listbox">
+              <li
+                v-for="f in FILTER_OPTIONS"
+                :key="f.value"
+                role="option"
+                :aria-selected="filter === f.value"
+                class="custom-select-option"
+                :class="{ 'is-selected': filter === f.value }"
+                @click="selectFilter(f.value)"
+              >
+                <span>{{ f.label }}</span>
+                <svg v-if="filter === f.value" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+              </li>
+            </ul>
+          </transition>
+        </div>
       </div>
 
       <!-- 搜索框 -->
@@ -592,105 +948,126 @@ onUnmounted(() => {
         <div
           v-for="task in pagedTasks"
           :key="task.id"
-          class="card hover:shadow-md transition-all"
+          class="task-card card hover:shadow-md transition-all"
         >
-          <div class="flex items-start justify-between mb-3">
-            <div class="flex-1 min-w-0">
-              <h3 class="font-semibold text-gray-800 truncate">
+          <!-- 折叠头：标题 + 状态 + 展开箭头，单行不换行、超出省略 -->
+          <div class="task-card-header" @click="onManualToggle(task)">
+            <div class="task-card-titlewrap">
+              <h3 class="task-card-title" :title="`${task.name}.mp4`">
                 {{ task.name }}.mp4
               </h3>
-              <p class="text-sm text-gray-500 truncate mt-1" :title="task.url">
+            </div>
+            <span
+              class="task-card-status px-3 py-1 rounded-full text-xs font-medium shrink-0"
+              :class="getStatusColor(task.status)"
+            >
+              {{ 
+                task.status === 'pending' ? '等待队列' :
+                task.status === 'downloading' ? '正在下载' :
+                task.status === 'merging' ? '正在合并' :
+                task.status === 'compressing' ? '正在压缩' :
+                task.status === 'packing' ? '正在分片' :
+                task.status === 'uploading' ? '正在上传' :
+                task.status === 'paused' ? '已暂停' :
+                task.status === 'completed' ? '已完成' :
+                task.status === 'failed' ? '失败' : 
+                task.status
+              }}
+            </span>
+            <svg
+              class="task-card-chevron shrink-0 transition-transform"
+              :class="{ 'is-open': isExpanded(task.id) }"
+              xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+            >
+              <polyline points="6 9 12 15 18 9" />
+            </svg>
+          </div>
+
+          <!-- 展开体：链接、操作按钮、进度、时间等 -->
+          <div v-show="isExpanded(task.id)" class="task-card-body">
+            <!-- 链接独占一行：链接省略 + 复制按钮（仅移动端显示） -->
+            <div class="task-card-urlrow mb-2">
+              <p class="task-card-url text-sm text-gray-500" :title="task.url">
                 {{ task.url }}
               </p>
-            </div>
-            <div class="flex items-center gap-2 ml-4">
-              <span
-                class="px-3 py-1 rounded-full text-xs font-medium"
-                :class="getStatusColor(task.status)"
-              >
-                {{ 
-                  task.status === 'pending' ? '等待队列' :
-                  task.status === 'downloading' ? '正在下载' :
-                  task.status === 'merging' ? '正在合并' :
-                  task.status === 'compressing' ? '正在压缩' :
-                  task.status === 'packing' ? '正在分片' :
-                  task.status === 'uploading' ? '正在上传' :
-                  task.status === 'paused' ? '已暂停' :
-                  task.status === 'completed' ? '已完成' :
-                  task.status === 'failed' ? '失败' : 
-                  task.status
-                }}
-              </span>
               <button
-                @click="openLogModal(task)"
-                class="p-2 text-gray-500 hover:text-primary transition-colors"
-                title="查看日志"
+                type="button"
+                class="copy-link-btn"
+                :class="{ 'is-copied': copiedLinkId === task.id }"
+                @click.stop="copyLink(task.url, task.id)"
+                :title="copiedLinkId === task.id ? '已复制' : '复制链接'"
               >
-                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" x2="16" y1="13" y2="13"/><line x1="8" x2="16" y1="17" y2="17"/><line x1="8" x2="10" y1="9" y2="9"/></svg>
-              </button>
-              <button
-                v-if="task.status === 'failed' || task.status === 'completed'"
-                @click="openRetryModal(task)"
-                class="text-gray-500 hover:text-primary transition-colors"
-                title="重试"
-              >
-                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                </svg>
-              </button>
-              <button
-                v-if="isTaskRunning(task)"
-                @click="downloadStore.pauseTaskById(task.id)"
-                class="p-2 text-gray-500 hover:text-amber-500 transition-colors"
-                title="暂停任务"
-              >
-                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg>
-              </button>
-              <button
-                v-if="task.status === 'paused'"
-                @click="downloadStore.resumeTaskById(task.id)"
-                class="p-2 text-gray-500 hover:text-green-500 transition-colors"
-                title="继续任务"
-              >
-                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="6 3 20 12 6 21 6 3"/></svg>
-              </button>
-              <button
-                v-if="isTaskRunning(task) || task.status === 'paused'"
-                @click="downloadStore.stopDownloadById(task.id)"
-                class="p-2 text-gray-500 hover:text-red-500 transition-colors"
-                title="停止任务"
-              >
-                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/></svg>
-              </button>
-
-              <button
-                v-if="task.keyPath"
-                @click="downloadTaskKey(task)"
-                :disabled="downloadingKey === task.id"
-                class="p-2 text-gray-500 hover:text-primary transition-colors disabled:opacity-50"
-                title="下载加密密钥"
-              >
-                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6"/><path d="m15.5 7.5 3 3L22 7l-3-3"/></svg>
-              </button>
-
-              <button
-                @click="deleteTask(task.id)"
-                class="p-2 text-gray-500 hover:text-red-500 transition-colors"
-                title="删除记录"
-              >
-                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/></svg>
+                <svg v-if="copiedLinkId !== task.id" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
+                <svg v-else xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                <span class="copy-link-text">{{ copiedLinkId === task.id ? '已复制' : '复制' }}</span>
               </button>
             </div>
-          </div>
+            <!-- 操作按钮独立成行，整体右对齐 -->
+            <div class="flex items-center justify-end gap-2 mb-3 action-buttons">
+                <button
+                  @click="openLogModal(task)"
+                  class="p-2 text-gray-500 hover:text-primary transition-colors"
+                  title="查看日志"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" x2="16" y1="13" y2="13"/><line x1="8" x2="16" y1="17" y2="17"/><line x1="8" x2="10" y1="9" y2="9"/></svg>
+                </button>
+                <button
+                  v-if="task.status === 'failed' || task.status === 'completed'"
+                  @click="openRetryModal(task)"
+                  class="text-gray-500 hover:text-primary transition-colors"
+                  title="重试"
+                >
+                  <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                  </svg>
+                </button>
+                <button
+                  v-if="isTaskRunning(task)"
+                  @click="downloadStore.pauseTaskById(task.id)"
+                  class="p-2 text-gray-500 hover:text-amber-500 transition-colors"
+                  title="暂停任务"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg>
+                </button>
+                <button
+                  v-if="task.status === 'paused'"
+                  @click="downloadStore.resumeTaskById(task.id)"
+                  class="p-2 text-gray-500 hover:text-green-500 transition-colors"
+                  title="继续任务"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="6 3 20 12 6 21 6 3"/></svg>
+                </button>
+                <button
+                  v-if="isTaskRunning(task) || task.status === 'paused'"
+                  @click="downloadStore.stopDownloadById(task.id)"
+                  class="p-2 text-gray-500 hover:text-red-500 transition-colors"
+                  title="停止任务"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/></svg>
+                </button>
+
+                <button
+                  v-if="task.keyPath"
+                  @click="downloadTaskKey(task)"
+                  :disabled="downloadingKey === task.id"
+                  class="p-2 text-gray-500 hover:text-primary transition-colors disabled:opacity-50"
+                  title="下载加密密钥"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6"/><path d="m15.5 7.5 3 3L22 7l-3-3"/></svg>
+                </button>
+
+                <button
+                  @click="deleteTask(task.id)"
+                  class="p-2 text-gray-500 hover:text-red-500 transition-colors"
+                  title="删除记录"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/></svg>
+                </button>
+              </div>
 
           <div v-if="isTaskRunning(task) || task.status === 'paused'" class="mb-3">
             <div class="flex justify-between text-xs text-gray-500 mb-1">
-                <span v-if="(task.status === 'downloading' || task.status === 'merging') && task.url?.toLowerCase().includes('.m3u8')">
-                  {{ task.downloadedSegments }} / {{ task.totalSegments }} 片段
-                </span>
-                <span v-else>
-                  {{ formatSize(task.downloadedSegments) }} / {{ formatSize(task.totalSegments) }}
-                </span>
+                <span>{{ getProgressText(task) }}</span>
                 <span>{{ task.progress.toFixed(1) }}%</span>
               </div>
             <div class="progress-bar">
@@ -715,6 +1092,7 @@ onUnmounted(() => {
           <div v-if="task.error" class="mt-2 text-xs flex justify-between items-center">
             <span class="text-red-500">{{ task.error }}</span>
             <span v-if="getEstimatedTime(task)" class="text-green-600">预计 {{ getEstimatedTime(task) }} 完成</span>
+          </div>
           </div>
         </div>
 
@@ -905,4 +1283,242 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+/* ===== 状态筛选：桌面按钮组 / 移动端自定义下拉框 ===== */
+/* 默认（桌面）：显示按钮组，隐藏下拉框 */
+.filter-select-wrap {
+  display: none;
+}
+/* 窄屏：隐藏横向按钮组，改为整行自定义下拉，杜绝左右滑动 */
+@media (max-width: 640px) {
+  .filter-tabs {
+    display: none;
+  }
+  .filter-select-wrap {
+    display: block;
+  }
+}
+
+/* 自定义下拉触发器 */
+.custom-select {
+  position: relative;
+  width: 100%;
+}
+.custom-select-trigger {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  background: #fff;
+  color: #374151;
+  font-size: 14px;
+  line-height: 1.25;
+  cursor: pointer;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.custom-select-trigger.is-open {
+  border-color: var(--color-primary, #4f46e5);
+  box-shadow: 0 0 0 2px rgba(79, 70, 229, 0.15);
+}
+.custom-select-value {
+  flex: 1 1 auto;
+  min-width: 0;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.custom-select-chevron {
+  flex: 0 0 auto;
+  margin-left: 8px;
+  color: #9ca3af;
+  transition: transform 0.2s ease;
+}
+.custom-select-chevron.is-open {
+  transform: rotate(180deg);
+}
+
+/* 下拉菜单：相对触发器定位，带阴影与最大高度滚动 */
+.custom-select-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 30;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  max-height: 264px;
+  overflow-y: auto;
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+}
+.custom-select-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 9px 10px;
+  border-radius: 6px;
+  font-size: 14px;
+  color: #374151;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.custom-select-option:hover,
+.custom-select-option:active {
+  background: #f3f4f6;
+}
+.custom-select-option.is-selected {
+  color: var(--color-primary, #4f46e5);
+  font-weight: 600;
+  background: rgba(79, 70, 229, 0.08);
+}
+
+/* 展开/收起过渡 */
+.dropdown-enter-active,
+.dropdown-leave-active {
+  transition: opacity 0.15s ease, transform 0.15s ease;
+}
+.dropdown-enter-from,
+.dropdown-leave-to {
+  opacity: 0;
+  transform: translateY(-4px);
+}
+
+/* 深色模式 */
+.dark .custom-select-trigger {
+  background: #1f2937;
+  border-color: #4b5563;
+  color: #e5e7eb;
+}
+.dark .custom-select-menu {
+  background: #1f2937;
+  border-color: #374151;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+.dark .custom-select-option {
+  color: #e5e7eb;
+}
+.dark .custom-select-option:hover,
+.dark .custom-select-option:active {
+  background: #374151;
+}
+.dark .custom-select-option.is-selected {
+  background: rgba(99, 102, 241, 0.18);
+}
+
+/* ===== 任务卡片折叠（移动端优先）===== */
+.task-card {
+  padding: 0;
+  overflow: hidden;
+}
+
+/* 折叠头：一行内 标题(可伸缩省略) + 状态 + 箭头，点击整行展开 */
+.task-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 48px;
+  padding: 8px 12px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.task-card-titlewrap {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* 标题强制单行，超出省略，绝不换行 */
+.task-card-title {
+  margin: 0;
+  font-weight: 600;
+  font-size: 14px;
+  color: #1f2937;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dark .task-card-title {
+  color: #f3f4f6;
+}
+
+.task-card-chevron {
+  color: #9ca3af;
+  transition: transform 0.2s ease;
+}
+.task-card-chevron.is-open {
+  transform: rotate(180deg);
+}
+
+/* 展开体恢复卡片内边距 */
+.task-card-body {
+  padding: 4px 12px 12px;
+  border-top: 1px solid rgba(0, 0, 0, 0.06);
+}
+.dark .task-card-body {
+  border-top-color: rgba(255, 255, 255, 0.08);
+}
+
+/* 链接行：链接(flex 省略) + 复制按钮，垂直居中对齐 */
+.task-card-urlrow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+/* 链接单行省略，不换行，占满剩余空间 */
+.task-card-url {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 复制链接按钮：桌面端与移动端均显示（图标+文字） */
+.copy-link-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  padding: 4px 8px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  background: #fff;
+  color: #6b7280;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+.copy-link-btn:hover {
+  color: var(--color-primary, #4f46e5);
+  border-color: var(--color-primary, #4f46e5);
+}
+.copy-link-btn.is-copied {
+  color: #16a34a;
+  border-color: #16a34a;
+}
+.dark .copy-link-btn {
+  background: #1f2937;
+  border-color: #4b5563;
+  color: #9ca3af;
+}
+
+/* 窄屏：操作按钮组允许换行，按钮保持可点尺寸 */
+@media (max-width: 640px) {
+  .task-card-body .action-buttons {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 2px;
+  }
+}
 </style>

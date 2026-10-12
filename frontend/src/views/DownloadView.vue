@@ -314,6 +314,18 @@ const formatSize = (kb: number) => {
   return `${(kb / 1024).toFixed(1)} MB`
 }
 
+// 统一进度主文本：m3u8 显示片段数，普通视频显示真实字节大小
+const getProgressText = (): string => {
+  const task = downloadStore.currentTask
+  if (!task) return ''
+  if (isM3U8Download.value) {
+    return `${task.downloadedSegments} / ${task.totalSegments} 片段`
+  }
+  const doneKB = task.downloadedBytes ? task.downloadedBytes / 1024 : task.downloadedSegments
+  const totalKB = task.totalBytes ? task.totalBytes / 1024 : task.totalSegments
+  return `${formatSize(doneKB)} / ${formatSize(totalKB)}`
+}
+
 // 解析速度字符串为 KB/s
 const parseSpeed = (speedStr: string): number => {
   if (!speedStr || speedStr === '0 B/s') return 0
@@ -366,13 +378,14 @@ const estimatedTime = computed(() => {
   let downloadedKB: number
   let totalKB: number
   
-  if ((status === 'downloading' || status === 'merging') && isM3U8Download.value) {
+  if (isM3U8Download.value) {
     // M3U8下载按片段计算，假设每片段约0.5MB
     downloadedKB = task.downloadedSegments * 512
     totalKB = task.totalSegments * 512
   } else {
-    downloadedKB = task.downloadedSegments
-    totalKB = task.totalSegments
+    // 普通视频：优先用持久化字节数(/1024 得 KB)，否则回退 WS 复用的 segments(KB)
+    totalKB = task.totalBytes ? task.totalBytes / 1024 : task.totalSegments
+    downloadedKB = task.downloadedBytes ? task.downloadedBytes / 1024 : task.downloadedSegments
   }
   
   if (totalKB <= 0 || downloadedKB >= totalKB) return ''
@@ -682,12 +695,7 @@ watch(isTaskCompleted, async (completed) => {
       <div class="space-y-4">
         <div>
           <div class="flex justify-between text-sm text-gray-500 mb-2">
-            <span v-if="(downloadStore.currentTask.status === 'downloading' || downloadStore.currentTask.status === 'merging') && isM3U8Download">
-              {{ downloadStore.currentTask.downloadedSegments }} / {{ downloadStore.currentTask.totalSegments }} 片段
-            </span>
-            <span v-else>
-              {{ formatSize(downloadStore.currentTask.downloadedSegments) }} / {{ formatSize(downloadStore.currentTask.totalSegments) }}
-            </span>
+            <span>{{ getProgressText() }}</span>
             <span>{{ downloadStore.currentTask.progress.toFixed(1) }}%</span>
           </div>
           <div class="progress-bar">
@@ -728,12 +736,9 @@ watch(isTaskCompleted, async (completed) => {
           </div>
 
           <div>
-            <span class="text-gray-500">{{ (downloadStore.currentTask.status === 'downloading' || downloadStore.currentTask.status === 'merging') && isM3U8Download ? '片段' : '容量' }}</span>
+            <span class="text-gray-500">{{ isM3U8Download ? '片段' : '容量' }}</span>
             <div class="font-mono text-gray-800">
-              {{ (downloadStore.currentTask.status === 'downloading' || downloadStore.currentTask.status === 'merging') && isM3U8Download
-                ? `${downloadStore.currentTask.downloadedSegments} / ${downloadStore.currentTask.totalSegments}` 
-                : `${formatSize(downloadStore.currentTask.downloadedSegments)} / ${formatSize(downloadStore.currentTask.totalSegments)}` 
-              }}
+              {{ getProgressText() }}
             </div>
           </div>
 

@@ -4,6 +4,7 @@ import (
 	"embed"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -24,14 +25,24 @@ import (
 //go:embed static
 var assets embed.FS
 
-var (
-	server      *http.Server
-	appInstance *App
-)
-
 func main() {
 	// 创建 Wails 应用
 	app := NewApp()
+
+	// 构建路由（REST API + WebSocket），同时挂到：
+	// 1) 本地真实 TCP 服务 —— WebSocket 只能走这里（AssetServer 不支持 WS 升级）
+	// 2) Wails AssetServer Handler —— 保持相对路径 HTTP API 可用
+	router := createRouter()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		log.Fatalf("Failed to listen local API server: %v", err)
+	}
+	app.serverBaseURL = "http://" + ln.Addr().String()
+	app.serverLn = ln
+	app.server = &http.Server{Handler: router}
+	// 在打开窗口前启动监听，确保 WebView 首屏请求（含 WS）时端口已 accept
+	app.serveLocalAPI()
 
 	// 获取静态文件目录
 	staticDir := getStaticDir()
@@ -51,7 +62,7 @@ func main() {
 		MinHeight: 600,
 		AssetServer: &assetserver.Options{
 			Assets:  staticFS.(fs.FS),
-			Handler: createRouter(),
+			Handler: router,
 		},
 		BackgroundColour: &options.RGBA{R: 30, G: 30, B: 40, A: 255},
 		OnStartup:        app.startup,
@@ -117,19 +128,65 @@ func createRouter() *mux.Router {
 	taskManager := service.NewTaskManager(dbStorage)
 	wsManager := websocket.NewWebSocketManager()
 	downloaderService := service.NewDownloaderService(taskManager, wsManager)
+
+	// FFmpeg 环境服务：检测系统/PATH/私有目录，并支持私有下载安装
+	ffmpegService := service.NewFFmpegService()
+	downloaderService.SetFFmpegService(ffmpegService)
+
 	schedulerService := service.NewSchedulerService(dbStorage, taskManager)
 	schedulerService.Start()
+
+	// 启动时将数据库中已持久化的并发与封装配置应用到下载服务
+	if persisted, err := dbStorage.GetSettings(); err != nil {
+		log.Printf("[WinUI] 启动加载设置失败: %v\n", err)
+	} else if persisted != nil {
+		downloaderService.UpdateConcurrencyConfig(
+			persisted.DownloadConcurrency,
+			persisted.MergeConcurrency,
+			persisted.CompressConcurrency,
+			persisted.PackConcurrency,
+			persisted.UploadConcurrency,
+			persisted.SingleMode,
+		)
+		downloaderService.UpdatePostDownloadConfig(
+			persisted.MergeAfterDownload,
+			persisted.MergeMethod,
+			persisted.FFmpegMuxMode,
+		)
+		downloaderService.UpdateHLSPackConfig(
+			persisted.HLSPackEnabled,
+			persisted.HLSEncryptEnabled,
+			persisted.HLSEncryptMode,
+			persisted.HLSKeyURL,
+			persisted.HLSPackForm,
+		)
+		downloaderService.UpdateCompressConfig(
+			persisted.CompressAfterMerge,
+			persisted.CompressBitrateThreshold,
+			persisted.CompressTargetBitrate,
+		)
+	}
 
 	// 初始化处理器
 	taskHandler := handler.NewTaskHandler(taskManager, downloaderService)
 	downloadHandler := handler.NewDownloadHandler(downloaderService, taskManager)
-	settingsHandler := handler.NewSettingsHandler(dbStorage, schedulerService, downloaderService)
+	speedTestService := service.NewSpeedTestService()
+	settingsHandler := handler.NewSettingsHandler(dbStorage, schedulerService, downloaderService, ffmpegService, speedTestService)
+	ffmpegHandler := handler.NewFFmpegHandler(ffmpegService)
 	authHandler := handler.NewAuthHandler()
 	diskHandler := handler.NewDiskHandler()
 	wsHandler := websocket.NewWebSocketHandler(wsManager)
 
 	router := mux.NewRouter()
-	router.Use(corsMiddleware)
+	// 必须在路由匹配失败前处理 CORS/PNA 预检：
+	// gorilla/mux 的中间件仅在路由命中后执行，未注册的 OPTIONS 会直接 405，
+	// 导致 WebView2 的 Private Network Access 预检失败（前端表现为 Network Error）。
+	router.Use(corsMiddleware, wailsLocalhostMiddleware)
+	// 全局 OPTIONS 兜底：所有跨域/PNA 预检统一 204
+	router.Methods(http.MethodOptions).Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Private-Network", "true")
+		w.WriteHeader(http.StatusNoContent)
+	}))
 
 	// API 路由
 	api := router.PathPrefix("/api").Subrouter()
@@ -158,6 +215,11 @@ func createRouter() *mux.Router {
 	protectedAPI.HandleFunc("/settings/clear-cache", settingsHandler.ClearCache).Methods("POST")
 	protectedAPI.HandleFunc("/settings/cleanup-config", settingsHandler.GetCleanupConfig).Methods("GET")
 	protectedAPI.HandleFunc("/settings/cleanup-config", settingsHandler.UpdateCleanupConfig).Methods("POST")
+	protectedAPI.HandleFunc("/settings/speedtest", settingsHandler.GetSpeedTestLog).Methods("GET")
+	protectedAPI.HandleFunc("/settings/speedtest/start", settingsHandler.StartSpeedTest).Methods("POST")
+	protectedAPI.HandleFunc("/settings/speedtest/stop", settingsHandler.StopSpeedTest).Methods("POST")
+	protectedAPI.HandleFunc("/ffmpeg/status", ffmpegHandler.Status).Methods("GET")
+	protectedAPI.HandleFunc("/ffmpeg/install", ffmpegHandler.Install).Methods("POST")
 
 	// 磁盘信息
 	router.HandleFunc("/api/disk/info", diskHandler.GetDiskInfo).Methods("GET")
@@ -172,15 +234,37 @@ func createRouter() *mux.Router {
 
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+		// 桌面端页面源为 wails://wails.localhost / http://wails.localhost，
+		// 回显具体源并允许凭据，避免 " * + credentials" 与 PNA 拦截
+		origin := r.Header.Get("Origin")
+		if origin != "" {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Vary", "Origin")
+		} else {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+		}
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		w.Header().Set("Access-Control-Allow-Credentials", "true")
 
 		if r.Method == "OPTIONS" {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
 
+		next.ServeHTTP(w, r)
+	})
+}
+
+// wailsLocalhostMiddleware 处理 WebView2 的 Private Network Access 预检：
+// Chromium 对从 wails.localhost（public 空间）访问 127.0.0.1（local 空间）
+// 会先发带 Access-Control-Request-Private-Network 的 OPTIONS，
+// 服务端必须回 Access-Control-Allow-Private-Network: true，否则请求直接被拦（Network Error）。
+func wailsLocalhostMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Access-Control-Request-Private-Network") == "true" {
+			w.Header().Set("Access-Control-Allow-Private-Network", "true")
+		}
 		next.ServeHTTP(w, r)
 	})
 }

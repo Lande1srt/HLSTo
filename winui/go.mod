@@ -37,6 +37,7 @@ require (
 	github.com/samber/lo v1.49.1 // indirect
 	github.com/studio-b12/gowebdav v0.12.0 // indirect
 	github.com/tkrajina/go-reflector v0.5.8 // indirect
+	github.com/ulikunitz/xz v0.5.12 // indirect
 	github.com/valyala/bytebufferpool v1.0.0 // indirect
 	github.com/valyala/fasttemplate v1.2.2 // indirect
 	github.com/wailsapp/go-webview2 v1.0.22 // indirect

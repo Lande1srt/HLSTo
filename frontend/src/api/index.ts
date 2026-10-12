@@ -1,6 +1,9 @@
 import axios from 'axios'
 import type { Settings } from '@/stores/settings'
+import { getHttpBase } from './runtime'
 
+// 桌面端（Wails）初始化完成后会改为 http://127.0.0.1:<port>/api；
+// 浏览器环境保持相对路径
 const api = axios.create({
   baseURL: '/api',
   timeout: 30000,
@@ -8,6 +11,14 @@ const api = axios.create({
     'Content-Type': 'application/json'
   }
 })
+
+/** 运行时探测完成后调用：将 REST 基址指向桌面端本地服务端口 */
+export function applyApiBase(): void {
+  const base = getHttpBase()
+  if (base) {
+    api.defaults.baseURL = `${base}/api`
+  }
+}
 
 api.interceptors.request.use((config) => {
   const token = localStorage.getItem('token')
@@ -53,7 +64,9 @@ export const downloadAPI = {
 
   upload: (taskId: string, config?: Record<string, unknown>) => api.post('/download/upload', { taskId, config }),
 
-  analyze: (url: string, referer?: string, cookie?: string) => api.post('/download/analyze', { url, referer, cookie })
+  // 分析需服务端抓取 m3u8/探测直链，慢网络下放宽到 60 秒
+  analyze: (url: string, referer?: string, cookie?: string) =>
+    api.post('/download/analyze', { url, referer, cookie }, { timeout: 60000 })
 }
 
 // saveBlob 触发浏览器下载一个 Blob

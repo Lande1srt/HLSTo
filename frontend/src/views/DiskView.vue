@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, watch } from 'vue'
 import { useSettingsStore } from '@/stores/settings'
+import { getHttpBase } from '@/api/runtime'
 
 const settingsStore = useSettingsStore()
 
@@ -23,7 +24,7 @@ let refreshTimer: ReturnType<typeof setInterval> | null = null
 
 const loadCurrentDisk = async () => {
   try {
-    const response = await fetch('/api/disk/info')
+    const response = await fetch(`${getHttpBase()}/api/disk/info`)
     const data = await response.json()
     if (data.code === 200 && data.data) {
       currentDisk.value = data.data
@@ -36,7 +37,7 @@ const loadCurrentDisk = async () => {
 const loadAllDisks = async () => {
   loadingDisks.value = true
   try {
-    const response = await fetch('/api/disk/all')
+    const response = await fetch(`${getHttpBase()}/api/disk/all`)
     const data = await response.json()
     if (data.code === 200 && data.data) {
       setTimeout(() => {

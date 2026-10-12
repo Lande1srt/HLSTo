@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
-import { downloadAPI } from '@/api'
+import { downloadAPI, taskAPI } from '@/api'
+import { buildWsUrl } from '@/api/runtime'
 
 export interface Task {
   id: string
@@ -11,6 +12,9 @@ export interface Task {
   speed: string
   totalSegments: number
   downloadedSegments: number
+  // 通用视频（非 m3u8）使用真实字节数；m3u8 任务这两个字段为 0
+  totalBytes?: number
+  downloadedBytes?: number
   outputPath?: string
   keyPath?: string
   error?: string
@@ -36,6 +40,86 @@ export const useDownloadStore = defineStore('download', () => {
   const isDownloading = ref(false)
   const ws = ref<WebSocket | null>(null)
 
+  // ===== WS 连接生命周期管理（自动重连 + REST 兜底）=====
+  // 桌面端（Wails/WebView2）带 taskId 的 WS 可能因 PNA/网络抖动关闭，
+  // 原先无重连、无兜底会导致首页永久丢失状态。
+  let activeTaskId: string | null = null
+  let wsManualClosed = false
+  let wsRetryTimer: ReturnType<typeof setTimeout> | null = null
+  let wsRetryAttempts = 0
+  let pollTimer: ReturnType<typeof setInterval> | null = null
+  let polling = false
+
+  const ACTIVE: Task['status'][] = ['pending', 'downloading', 'merging', 'compressing', 'packing', 'uploading', 'paused']
+
+  const clearRetryTimer = () => {
+    if (wsRetryTimer !== null) {
+      clearTimeout(wsRetryTimer)
+      wsRetryTimer = null
+    }
+  }
+
+  // stopPolling 停止 REST 兜底轮询
+  const stopPolling = () => {
+    if (pollTimer !== null) {
+      clearInterval(pollTimer)
+      pollTimer = null
+    }
+  }
+
+  // syncTaskFromServer 通过 REST 拉取单任务状态做最终一致兜底
+  const syncTaskFromServer = async (taskId: string) => {
+    if (polling) return
+    polling = true
+    try {
+      const res = await taskAPI.get(taskId)
+      const t = res.data?.data
+      if (t && currentTask.value && currentTask.value.id === taskId) {
+        currentTask.value.status = t.status
+        currentTask.value.progress = t.progress
+        currentTask.value.speed = t.speed
+        currentTask.value.downloadedSegments = t.downloadedSegments
+        currentTask.value.totalSegments = t.totalSegments
+        currentTask.value.totalBytes = t.totalBytes
+        currentTask.value.downloadedBytes = t.downloadedBytes
+        if (t.outputPath) currentTask.value.outputPath = t.outputPath
+        if (t.error) currentTask.value.error = t.error
+        if (t.status === 'completed' || t.status === 'failed') {
+          isDownloading.value = false
+        }
+      }
+    } catch {
+      // 静默：WS 才是主通道，REST 仅兜底，不打日志骚扰
+    } finally {
+      polling = false
+    }
+  }
+
+  // startPolling 仅在任务活跃时每 3 秒拉取一次，结束即停
+  const startPolling = (taskId: string) => {
+    stopPolling()
+    pollTimer = setInterval(() => {
+      const t = currentTask.value
+      if (!t || t.id !== taskId || !ACTIVE.includes(t.status)) {
+        stopPolling()
+        return
+      }
+      syncTaskFromServer(taskId)
+    }, 3000)
+  }
+
+  // closeConnection 主动拆除连接：标记后不再重连，并停止兜底轮询
+  const closeConnection = () => {
+    wsManualClosed = true
+    activeTaskId = null
+    clearRetryTimer()
+    stopPolling()
+    if (ws.value) {
+      ws.value.close()
+      ws.value = null
+    }
+  }
+
   const addLog = (level: LogEntry['level'], message: string) => {
     const now = new Date()
     const pad = (n: number) => n.toString().padStart(2, '0')
@@ -52,64 +136,94 @@ export const useDownloadStore = defineStore('download', () => {
   }
 
   const connectWebSocket = (taskId: string) => {
+    // 清理旧连接与重试
+    wsManualClosed = false
+    activeTaskId = taskId
+    clearRetryTimer()
     if (ws.value) {
       ws.value.close()
+      ws.value = null
     }
 
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const wsUrl = `${protocol}//${window.location.host}/ws?taskId=${taskId}`
+    const openSocket = () => {
+      // 任务已结束或被重置则不再重连
+      if (wsManualClosed || activeTaskId !== taskId) return
 
-    ws.value = new WebSocket(wsUrl)
+      const wsUrl = buildWsUrl(`/ws?taskId=${taskId}`)
+      const socket = new WebSocket(wsUrl)
+      ws.value = socket
 
-    ws.value.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data)
+      socket.onopen = () => {
+        wsRetryAttempts = 0
+        // 连接成功后立即拉一次，补齐建连前漏掉的进度/状态
+        syncTaskFromServer(taskId)
+      }
 
-        switch (data.type) {
-          case 'progress':
-            if (currentTask.value && data.taskId === currentTask.value.id) {
-              currentTask.value.progress = data.progress
-              currentTask.value.speed = data.speed
-              currentTask.value.downloadedSegments = data.downloadedSegments
-              currentTask.value.totalSegments = data.totalSegments
-            }
-            break
+      socket.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data)
 
-          case 'log':
-            addLog(data.level, data.message)
-            break
-
-          case 'status':
-            if (currentTask.value && data.taskId === currentTask.value.id) {
-              currentTask.value.status = data.status
-              if (data.message) {
-                addLog('info', data.message)
-                currentTask.value.error = data.message
-              } else {
-                currentTask.value.error = ''
+          switch (data.type) {
+            case 'progress':
+              if (currentTask.value && data.taskId === currentTask.value.id) {
+                currentTask.value.progress = data.progress
+                currentTask.value.speed = data.speed
+                currentTask.value.downloadedSegments = data.downloadedSegments
+                currentTask.value.totalSegments = data.totalSegments
               }
-              if (data.status === 'completed' || data.status === 'failed') {
-                isDownloading.value = false
-                if (data.status === 'completed' && data.outputPath) {
-                  currentTask.value.outputPath = data.outputPath
+              break
+
+            case 'log':
+              addLog(data.level, data.message)
+              break
+
+            case 'status':
+              if (currentTask.value && data.taskId === currentTask.value.id) {
+                currentTask.value.status = data.status
+                if (data.message) {
+                  addLog('info', data.message)
+                  currentTask.value.error = data.message
+                } else {
+                  currentTask.value.error = ''
+                }
+                if (data.status === 'completed' || data.status === 'failed') {
+                  isDownloading.value = false
+                  if (data.status === 'completed' && data.outputPath) {
+                    currentTask.value.outputPath = data.outputPath
+                  }
                 }
               }
-            }
-            break
+              break
+          }
+        } catch (error) {
+          console.error('WebSocket message parse error:', error)
         }
-      } catch (error) {
-        console.error('WebSocket message parse error:', error)
+      }
+
+      socket.onerror = (error) => {
+        console.error('WebSocket error:', error)
+      }
+
+      socket.onclose = () => {
+        // 仅在当前连接仍是该 socket、任务仍活跃且非主动关闭时重连
+        if (wsManualClosed || activeTaskId !== taskId || ws.value !== socket) return
+        const t = currentTask.value
+        const stillActive = !!t && t.id === taskId && ACTIVE.includes(t.status)
+        if (!stillActive) return
+
+        wsRetryAttempts += 1
+        // 指数退避：1s、2s、4s…上限 10s
+        const delay = Math.min(1000 * 2 ** (wsRetryAttempts - 1), 10000)
+        clearRetryTimer()
+        wsRetryTimer = setTimeout(() => {
+          openSocket()
+        }, delay)
       }
     }
 
-    ws.value.onerror = (error) => {
-      console.error('WebSocket error:', error)
-      addLog('error', 'WebSocket 连接错误')
-    }
-
-    ws.value.onclose = () => {
-      console.log('WebSocket closed')
-    }
+    openSocket()
+    // REST 兜底：无论 WS 是否可用，活跃期间周期性同步状态
+    startPolling(taskId)
   }
 
   const startDownload = async (params: {
@@ -247,10 +361,7 @@ export const useDownloadStore = defineStore('download', () => {
       await downloadAPI.stop(taskId)
       
       if (currentTask.value?.id === taskId) {
-        if (ws.value) {
-          ws.value.close()
-          ws.value = null
-        }
+        closeConnection()
         currentTask.value.status = 'failed'
         isDownloading.value = false
       }
@@ -316,10 +427,7 @@ export const useDownloadStore = defineStore('download', () => {
   }
 
   const reset = () => {
-    if (ws.value) {
-      ws.value.close()
-      ws.value = null
-    }
+    closeConnection()
     currentTask.value = null
     isDownloading.value = false
   }
