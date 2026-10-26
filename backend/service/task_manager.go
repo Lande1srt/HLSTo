@@ -117,6 +117,9 @@ func (tm *TaskManager) submitStorage(op storageOp) {
 }
 
 func (tm *TaskManager) loadTasksFromDB() {
+	if tm.storage == nil {
+		return
+	}
 	tasks, err := tm.storage.GetAllTasks()
 	if err != nil {
 		return
@@ -152,6 +155,26 @@ func (tm *TaskManager) GetTask(id string) (*model.Task, bool) {
 	return task, exists
 }
 
+// IsWorkDirShared 判断给定工作目录是否被「除 excludeTaskID 之外」的其它任务引用。
+// 用于识别历史版本因目录名仅精确到分钟而造成的多任务共用同一工作目录的损坏情况：
+// 这种目录里的分片互相覆盖，重试时必须放弃复用、改分配全新的唯一目录，否则冲突会持续复现。
+func (tm *TaskManager) IsWorkDirShared(workDir, excludeTaskID string) bool {
+	if workDir == "" {
+		return false
+	}
+	tm.mu.RLock()
+	defer tm.mu.RUnlock()
+	for id, t := range tm.tasks {
+		if id == excludeTaskID {
+			continue
+		}
+		if t != nil && t.WorkDir == workDir {
+			return true
+		}
+	}
+	return false
+}
+
 // UpdateTask 提交持久化。注意：调用方应先在外部修改 task 指针的字段（map 内与传入的是同一对象），
 // 再调用本方法触发 DB 写入。入队时在锁保护下复制快照，持久化 goroutine 只读副本。
 func (tm *TaskManager) UpdateTask(task *model.Task) {
@@ -171,6 +194,9 @@ func (tm *TaskManager) DeleteTask(id string) {
 		}
 	}
 	delete(tm.tasks, id)
+	// 同步清理节流记录，避免任务删除后 lastUpdate/lastLog 条目长期残留造成内存缓慢增长
+	delete(tm.lastUpdate, id)
+	delete(tm.lastLog, id)
 	tm.mu.Unlock()
 
 	// 密钥库：删 keys/{id}.key 并移除 index.json 条目（不存在为无操作）

@@ -226,8 +226,6 @@ func (s *SpeedTestService) finish(state, errMsg string) {
 				s.log.Error = errMsg
 			}
 		}
-		cp := *s.log
-		cp.PerSecond = append([]string(nil), s.log.PerSecond...)
 	}
 	s.logMu.Unlock()
 

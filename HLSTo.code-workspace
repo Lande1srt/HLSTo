@@ -5,6 +5,12 @@
 		},
 		{
 			"path": "../V2ideo"
+		},
+		{
+			"path": "../../Gitweb/as_player"
+		},
+		{
+			"path": "../thets"
 		}
 	],
 	"settings": {},

@@ -314,11 +314,11 @@ const formatSize = (kb: number) => {
   return `${(kb / 1024).toFixed(1)} MB`
 }
 
-// 统一进度主文本：m3u8 显示片段数，普通视频显示真实字节大小
+// 统一进度主文本：仅下载/合并阶段的 m3u8 显示片段数，其余阶段（上传等）显示真实字节大小
 const getProgressText = (): string => {
   const task = downloadStore.currentTask
   if (!task) return ''
-  if (isM3U8Download.value) {
+  if (isM3U8Download.value && (task.status === 'downloading' || task.status === 'merging')) {
     return `${task.downloadedSegments} / ${task.totalSegments} 片段`
   }
   const doneKB = task.downloadedBytes ? task.downloadedBytes / 1024 : task.downloadedSegments
@@ -378,12 +378,12 @@ const estimatedTime = computed(() => {
   let downloadedKB: number
   let totalKB: number
   
-  if (isM3U8Download.value) {
-    // M3U8下载按片段计算，假设每片段约0.5MB
+  if (isM3U8Download.value && (status === 'downloading' || status === 'merging')) {
+    // M3U8 下载/合并按片段计算，假设每片段约0.5MB
     downloadedKB = task.downloadedSegments * 512
     totalKB = task.totalSegments * 512
   } else {
-    // 普通视频：优先用持久化字节数(/1024 得 KB)，否则回退 WS 复用的 segments(KB)
+    // 普通视频或上传等阶段：优先用持久化字节数(/1024 得 KB)，否则回退 WS 复用的 segments(KB)
     totalKB = task.totalBytes ? task.totalBytes / 1024 : task.totalSegments
     downloadedKB = task.downloadedBytes ? task.downloadedBytes / 1024 : task.downloadedSegments
   }
@@ -736,7 +736,7 @@ watch(isTaskCompleted, async (completed) => {
           </div>
 
           <div>
-            <span class="text-gray-500">{{ isM3U8Download ? '片段' : '容量' }}</span>
+            <span class="text-gray-500">{{ isM3U8Download && (downloadStore.currentTask.status === 'downloading' || downloadStore.currentTask.status === 'merging') ? '片段' : '容量' }}</span>
             <div class="font-mono text-gray-800">
               {{ getProgressText() }}
             </div>
