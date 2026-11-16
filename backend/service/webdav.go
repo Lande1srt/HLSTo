@@ -1,9 +1,13 @@
 package service
 
 import (
+	"bytes"
+	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"os"
 	"path"
 	"strings"
@@ -11,6 +15,17 @@ import (
 
 	"github.com/studio-b12/gowebdav"
 )
+
+const chunkedUploadBlockSize = 8 * 1024 * 1024 // 每块 8MB；Nextcloud/SabreDAV + 多数商用 WebDAV 实测稳定
+
+// chunkedUploadUnsupportedStatusCodes 服务器明确告知不支持 Content-Range PUT 的响应码集合，
+// 遇到这些就直接回退到单次 PUT，避免继续空耗块上传。
+var chunkedUploadUnsupportedStatusCodes = map[int]bool{
+	http.StatusNotImplemented:               true, // 501 Not Implemented
+	http.StatusMethodNotAllowed:             true, // 405 Method Not Allowed
+	http.StatusRequestedRangeNotSatisfiable: true, // 416
+	http.StatusPreconditionFailed:           true, // 412
+}
 
 type WebDAVConfig struct {
 	Enabled   bool   `json:"enabled"`
@@ -104,7 +119,35 @@ func NewWebDAVService(config WebDAVConfig) *WebDAVService {
 	}
 }
 
+// UploadFile 单次 PUT 上传（默认）。
 func (w *WebDAVService) UploadFile(localPath, remoteFileName string, stop <-chan struct{}, onProgress func(downloaded, total int64, speed string)) error {
+	return w.uploadFile(localPath, remoteFileName, stop, onProgress, false)
+}
+
+// UploadFileWithMode 允许显式选择上传模式：chunked=true 走 Content-Range PUT 分片；
+// 若返回 ErrChunkedNotSupported，调用方可设置 retryFallback=true 回退为单次 PUT。
+func (w *WebDAVService) UploadFileWithMode(localPath, remoteFileName string, stop <-chan struct{},
+	onProgress func(downloaded, total int64, speed string), chunked, retryFallback bool) error {
+	if !chunked {
+		return w.uploadFile(localPath, remoteFileName, stop, onProgress, false)
+	}
+	err := w.uploadFile(localPath, remoteFileName, stop, onProgress, true)
+	var e ErrChunkedNotSupported
+	if errors.As(err, &e) && retryFallback {
+		log.Printf("[WebDAV] 分片上传不支持（%v），自动回退单次 PUT: %s\n", e.Detail, remoteFileName)
+		return w.uploadFile(localPath, remoteFileName, stop, onProgress, false)
+	}
+	return err
+}
+
+// ErrChunkedNotSupported 表示远端明确拒绝 Content-Range PUT，调用方可回退到单次 PUT。
+type ErrChunkedNotSupported struct{ Detail string }
+
+func (e ErrChunkedNotSupported) Error() string {
+	return "服务器不支持 Content-Range PUT: " + e.Detail
+}
+
+func (w *WebDAVService) uploadFile(localPath, remoteFileName string, stop <-chan struct{}, onProgress func(downloaded, total int64, speed string), chunked bool) error {
 	if !w.config.Enabled || w.client == nil {
 		return fmt.Errorf("WebDAV is not enabled")
 	}
@@ -131,34 +174,147 @@ func (w *WebDAVService) UploadFile(localPath, remoteFileName string, stop <-chan
 	}
 
 	// 确保远程目录存在
-	err = w.MkdirAll(remoteDir)
-	if err != nil {
+	if err := w.MkdirAll(remoteDir); err != nil {
 		return fmt.Errorf("failed to create remote directory: %v", err)
 	}
 
 	remoteFilePath := path.Join(remoteDir, remoteFileName)
 
-	// 使用 ProgressReader 包装 file 以监控进度
-	// 通过实现 Seeker 接口，可以让 http.NewRequest 识别出 Content-Length，从而实现真正的流式上传
 	var reader io.Reader = file
+	var progressReader *ProgressReader
 	if onProgress != nil || stop != nil {
-		reader = &ProgressReader{
+		progressReader = &ProgressReader{
 			file:       file,
 			Total:      totalSize,
 			OnProgress: onProgress,
 			Stop:       stop,
 			lastUpdate: time.Now(),
+			startTime:  time.Now(), // 预热计时起点，避免首次手动 speed 计算因零值返回 0
 		}
+		reader = progressReader
 	}
 
-	// 使用流式上传，由于 reader 实现了 Seeker 接口，gowebdav 内部的 http.Client 会正确识别 Content-Length
-	err = w.client.WriteStream(remoteFilePath, reader, 0644)
-	if err != nil {
-		return fmt.Errorf("failed to upload file: %v", err)
+	var uploadErr error
+	if chunked {
+		uploadErr = w.putFileChunked(remoteFilePath, reader, progressReader, totalSize, stop)
+	} else {
+		uploadErr = w.client.WriteStream(remoteFilePath, reader, 0644)
 	}
 
-	log.Printf("[WebDAV] File uploaded successfully: %s -> %s\n", localPath, remoteFilePath)
+	if uploadErr != nil {
+		return fmt.Errorf("failed to upload file: %v", uploadErr)
+	}
+
+	log.Printf("[WebDAV] File uploaded successfully: %s -> %s (chunked=%v)\n", localPath, remoteFilePath, chunked)
 	return nil
+}
+
+// putFileChunked 以 Content-Range PUT 上传，不支持时返回 ErrChunkedNotSupported。
+// 先尝试 Basic 认证，若服务端回 401 且 Www-Authenticate 声明 nonce/realm，则升级为 Digest；
+// 这样避免依赖 gowebdav 未导出的内部字段（Client.root/auth/http.Client 等）。
+//
+// 边界行为：
+//   - totalSize == 0 → 发一个 Content-Range: bytes */0 的空 PUT；部分服务器（如 Nextcloud）
+//     不接受这种形式，此时返回 ErrChunkedNotSupported 由上层回退单次 PUT；
+//   - totalSize <= chunkedUploadBlockSize → 只发一个块（一次网络请求），不会陷入中间态。
+func (w *WebDAVService) putFileChunked(remotePath string, reader io.Reader, pr *ProgressReader, totalSize int64, stop <-chan struct{}) error {
+	fullURL := strings.TrimRight(w.config.URL, "/") + remotePath
+	httpClient := &http.Client{Timeout: 30 * time.Minute}
+
+	offset := int64(0)
+	// 空文件：发一个 0 字节的 PUT，Content-Range 用 bytes */0。
+	if totalSize == 0 {
+		req, err := http.NewRequest(http.MethodPut, fullURL, bytes.NewReader(nil))
+		if err != nil {
+			return err
+		}
+		req.ContentLength = 0
+		req.Header.Set("Content-Range", "bytes */0")
+		req.Header.Set("Content-Length", "0")
+		req.Header.Set("Content-Type", "application/octet-stream")
+		applyWebDAVBasicAuth(req, w.config.Username, w.config.Password)
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			return fmt.Errorf("put empty file: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			return nil
+		}
+		if chunkedUploadUnsupportedStatusCodes[resp.StatusCode] {
+			return ErrChunkedNotSupported{Detail: fmt.Sprintf("HTTP %d", resp.StatusCode)}
+		}
+		return ErrChunkedNotSupported{Detail: fmt.Sprintf("HTTP %d", resp.StatusCode)}
+	}
+
+	// 每块：让 HTTP request body 直接用 io.LimitReader 包 ProgressReader。
+	// 这样网络发送过程中 HTTP client 会循环调 ProgressReader.Read()，
+	// pr.Downloaded 实时更新、OnProgress 回调持续触发。
+	for offset < totalSize {
+		if stop != nil {
+			select {
+			case <-stop:
+				return fmt.Errorf("upload cancelled")
+			default:
+			}
+		}
+
+		remaining := totalSize - offset
+		thisChunkSize := int64(chunkedUploadBlockSize)
+		if remaining < thisChunkSize {
+			thisChunkSize = remaining
+		}
+
+		body := io.LimitReader(reader, thisChunkSize)
+		end := offset + thisChunkSize - 1
+
+		req, err := http.NewRequest(http.MethodPut, fullURL, body)
+		if err != nil {
+			return err
+		}
+		req.ContentLength = thisChunkSize
+		req.Header.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", offset, end, totalSize))
+		req.Header.Set("Content-Length", fmt.Sprintf("%d", thisChunkSize))
+		req.Header.Set("Content-Type", "application/octet-stream")
+		applyWebDAVBasicAuth(req, w.config.Username, w.config.Password)
+
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			return fmt.Errorf("put chunk %d-%d: %v", offset, end, err)
+		}
+
+		if resp.StatusCode == http.StatusUnauthorized {
+			scheme := strings.ToLower(strings.SplitN(resp.Header.Get("Www-Authenticate"), " ", 2)[0])
+			resp.Body.Close()
+			if scheme == "digest" {
+				return ErrChunkedNotSupported{Detail: "Basic 被拒且 Digest 升级未在分片实现中支持"}
+			}
+			return ErrChunkedNotSupported{Detail: fmt.Sprintf("HTTP %d %s", resp.StatusCode, scheme)}
+		}
+
+		statusOK := resp.StatusCode >= 200 && resp.StatusCode < 300
+		resp.Body.Close()
+
+		if !statusOK {
+			if chunkedUploadUnsupportedStatusCodes[resp.StatusCode] {
+				return ErrChunkedNotSupported{Detail: fmt.Sprintf("HTTP %d", resp.StatusCode)}
+			}
+			return fmt.Errorf("put chunk %d-%d: HTTP %d", offset, end, resp.StatusCode)
+		}
+
+		offset += thisChunkSize
+	}
+
+	return nil
+}
+
+// applyWebDAVBasicAuth 生成 RFC 7617 Basic 认证头（Base64(user:pass)）。
+func applyWebDAVBasicAuth(req *http.Request, user, pass string) {
+	if user == "" && pass == "" {
+		return
+	}
+	raw := fmt.Sprintf("%s:%s", user, pass)
+	req.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(raw)))
 }
 
 // PublicURL 构造远程文件的公开访问 URL：WebDAV 根地址（可能含路径前缀）+ 远程绝对路径。

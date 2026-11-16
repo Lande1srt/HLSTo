@@ -27,55 +27,84 @@ const (
 )
 
 type Task struct {
-	ID                 string     `json:"id"`
-	URL                string     `json:"url"`
-	Name               string     `json:"name"`
-	Status             TaskStatus `json:"status"`
-	Progress           float64    `json:"progress"`
-	Speed              string     `json:"speed"`
-	TotalSegments      int        `json:"totalSegments"`             // M3U8: 分片总数
-	DownloadedSegments int        `json:"downloadedSegments"`        // M3U8: 已下载分片数
-	TotalBytes         int64      `json:"totalBytes,omitempty"`      // 通用视频: 总字节数
-	DownloadedBytes    int64      `json:"downloadedBytes,omitempty"` // 通用视频: 已下载字节数
-	OutputPath         string     `json:"outputPath,omitempty"`
-	Error              string     `json:"error,omitempty"`
-	CreatedAt          time.Time  `json:"createdAt"`
-	CompletedAt        *time.Time `json:"completedAt,omitempty"`
-	ThreadCount        int        `json:"threadCount"`
-	HostType           string     `json:"hostType"`
-	Cookie             string     `json:"cookie"`
-	Referer            string     `json:"referer"`
-	AutoClear          bool       `json:"autoClear"`
-	SavePath           string     `json:"savePath"`
-	EnableWebDAV       bool       `json:"enableWebDAV"`
-	WebDAVURL          string     `json:"webDAVURL"`
-	WebDAVUsername     string     `json:"webDAVUsername"`
-	WebDAVPassword     string     `json:"webDAVPassword"`
-	WebDAVRemoteDir    string     `json:"webDAVRemoteDir"`
-	DeleteAfterUpload  bool       `json:"deleteAfterUpload"`
-	KeyPath            string     `json:"keyPath,omitempty"` // 二次 HLS 加密密钥本地路径（供下载，随任务删除）
-	PlayURL            string     `json:"playUrl,omitempty"` // 上传完成后可播放的 m3u8 远程地址（二次 HLS）
-	WorkDir            string     `json:"workDir,omitempty"` // 本次下载工作目录（cache/产物所在），重试/强制合并据此定位，避免目录错位
+	ID                  string     `json:"id"`
+	URL                 string     `json:"url"`
+	Name                string     `json:"name"`
+	Status              TaskStatus `json:"status"`
+	Progress            float64    `json:"progress"`
+	Speed               string     `json:"speed"`
+	TotalSegments       int        `json:"totalSegments"`             // M3U8: 分片总数
+	DownloadedSegments  int        `json:"downloadedSegments"`        // M3U8: 已下载分片数
+	TotalBytes          int64      `json:"totalBytes,omitempty"`      // 通用视频: 总字节数
+	DownloadedBytes     int64      `json:"downloadedBytes,omitempty"` // 通用视频: 已下载字节数
+	OutputPath          string     `json:"outputPath,omitempty"`
+	Error               string     `json:"error,omitempty"`
+	CreatedAt           time.Time  `json:"createdAt"`
+	CompletedAt         *time.Time `json:"completedAt,omitempty"`
+	ThreadCount         int        `json:"threadCount"`
+	HostType            string     `json:"hostType"`
+	Cookie              string     `json:"cookie"`
+	Referer             string     `json:"referer"`
+	AutoClear           bool       `json:"autoClear"`
+	SavePath            string     `json:"savePath"`
+	EnableWebDAV        bool       `json:"enableWebDAV"`
+	WebDAVURL           string     `json:"webDAVURL"`
+	WebDAVUsername      string     `json:"webDAVUsername"`
+	WebDAVPassword      string     `json:"webDAVPassword"`
+	WebDAVRemoteDir     string     `json:"webDAVRemoteDir"`
+	DeleteAfterUpload   bool       `json:"deleteAfterUpload"`
+	EnableChunkedUpload bool       `json:"enableChunkedUpload"`
+	KeyPath             string     `json:"keyPath,omitempty"` // 二次 HLS 加密密钥本地路径（供下载，随任务删除）
+	PlayURL             string     `json:"playUrl,omitempty"` // 上传完成后可播放的 m3u8 远程地址（二次 HLS）
+	WorkDir             string     `json:"workDir,omitempty"` // 本次下载工作目录（cache/产物所在），重试/强制合并据此定位，避免目录错位
+	NodeOrigin          string     `json:"-"`                 // 创建任务时的节点源地址，供 single 产物重试后仍生成一致 meta.json
+
+	// --- 配置快照：创建任务时从全局设置拷贝，重试/恢复按快照执行，不受后续全局设置变更影响 ---
+	MergeAfterDownload       bool   `json:"mergeAfterDownload"`
+	MergeMethod              string `json:"mergeMethod"`
+	FFmpegMuxMode            string `json:"ffmpegMuxMode"`
+	CompressAfterMerge       bool   `json:"compressAfterMerge"`
+	CompressBitrateThreshold int    `json:"compressBitrateThreshold"`
+	CompressTargetBitrate    int    `json:"compressTargetBitrate"`
+	HLSPackEnabled           bool   `json:"hlsPackEnabled"`
+	HLSEncryptEnabled        bool   `json:"hlsEncryptEnabled"`
+	HLSEncryptMode           string `json:"hlsEncryptMode"`
+	HLSKeyURL                string `json:"hlsKeyURL"`
+	HLSPackForm              string `json:"hlsPackForm"`
 }
 
 type DownloadRequest struct {
-	URL               string    `json:"url"`
-	ThreadCount       int       `json:"threadCount"`
-	OutputName        string    `json:"outputName"`
-	HostType          string    `json:"hostType"`
-	Cookie            string    `json:"cookie"`
-	Referer           string    `json:"referer"`
-	AutoClear         bool      `json:"autoClear"`
-	SavePath          string    `json:"savePath"`
-	EnableWebDAV      bool      `json:"enableWebDAV"`
-	WebDAVURL         string    `json:"webDAVURL"`
-	WebDAVUsername    string    `json:"webDAVUsername"`
-	WebDAVPassword    string    `json:"webDAVPassword"`
-	WebDAVRemoteDir   string    `json:"webDAVRemoteDir"`
-	DeleteAfterUpload bool      `json:"deleteAfterUpload"`
-	RetryMode         RetryMode `json:"retryMode"`
+	URL                 string    `json:"url"`
+	ThreadCount         int       `json:"threadCount"`
+	OutputName          string    `json:"outputName"`
+	HostType            string    `json:"hostType"`
+	Cookie              string    `json:"cookie"`
+	Referer             string    `json:"referer"`
+	AutoClear           bool      `json:"autoClear"`
+	SavePath            string    `json:"savePath"`
+	EnableWebDAV        bool      `json:"enableWebDAV"`
+	WebDAVURL           string    `json:"webDAVURL"`
+	WebDAVUsername      string    `json:"webDAVUsername"`
+	WebDAVPassword      string    `json:"webDAVPassword"`
+	WebDAVRemoteDir     string    `json:"webDAVRemoteDir"`
+	DeleteAfterUpload   bool      `json:"deleteAfterUpload"`
+	EnableChunkedUpload bool      `json:"enableChunkedUpload"`
+	RetryMode           RetryMode `json:"retryMode"`
 	// NodeOrigin 服务端节点源地址（scheme://host），由 HTTP 入口填充，写入 single 产物的 meta.json
 	NodeOrigin string `json:"-"`
+
+	// --- 配置快照：创建任务时从全局设置填充，download() 流程从 req 读取 ---
+	MergeAfterDownload       bool   `json:"mergeAfterDownload"`
+	MergeMethod              string `json:"mergeMethod"`
+	FFmpegMuxMode            string `json:"ffmpegMuxMode"`
+	CompressAfterMerge       bool   `json:"compressAfterMerge"`
+	CompressBitrateThreshold int    `json:"compressBitrateThreshold"`
+	CompressTargetBitrate    int    `json:"compressTargetBitrate"`
+	HLSPackEnabled           bool   `json:"hlsPackEnabled"`
+	HLSEncryptEnabled        bool   `json:"hlsEncryptEnabled"`
+	HLSEncryptMode           string `json:"hlsEncryptMode"`
+	HLSKeyURL                string `json:"hlsKeyURL"`
+	HLSPackForm              string `json:"hlsPackForm"`
 }
 
 type APIResponse struct {
@@ -224,6 +253,9 @@ type WebDAVSettings struct {
 	WebDAVPassword    string `json:"webDAVPassword"`
 	WebDAVRemoteDir   string `json:"webDAVRemoteDir"`
 	DeleteAfterUpload bool   `json:"deleteAfterUpload"`
+	// EnableChunkedUpload 启用 Content-Range PUT 分片上传（每块 8MB），默认关闭。
+	// 部分 WebDAV 服务端（如 Nextcloud/SabreDAV）支持；不支持时会自动回退到单次 PUT。
+	EnableChunkedUpload bool `json:"enableChunkedUpload"`
 }
 
 // QueueSettings 下载 / 合并 / 上传 队列并发控制

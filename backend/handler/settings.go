@@ -204,6 +204,9 @@ func (h *SettingsHandler) SaveSettings(w http.ResponseWriter, r *http.Request) {
 			newSettings.CompressBitrateThreshold,
 			newSettings.CompressTargetBitrate,
 		)
+		h.downloaderService.UpdateUploadModeConfig(
+			newSettings.EnableChunkedUpload,
+		)
 	}
 
 	OK(w, newSettings)
@@ -250,7 +253,11 @@ func (h *SettingsHandler) StartSpeedTest(w http.ResponseWriter, r *http.Request)
 		Password:  req.WebDAVPassword,
 		RemoteDir: req.WebDAVRemoteDir,
 	}
-	if err := h.speedTestService.Start(cfg, req.SizeMB); err != nil {
+	chunked := false
+	if s, err := h.storage.GetSettings(); err == nil {
+		chunked = s.EnableChunkedUpload
+	}
+	if err := h.speedTestService.Start(cfg, req.SizeMB, chunked); err != nil {
 		Err(w, http.StatusConflict, err.Error())
 		return
 	}

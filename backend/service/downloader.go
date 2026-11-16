@@ -58,6 +58,10 @@ type DownloaderService struct {
 	compressThresholdKbps atomic.Int32
 	compressTargetKbps    atomic.Int32
 
+	// WebDAV 分片上传开关：默认关闭。开启后 putFileChunked 按 8MB + Content-Range PUT，
+	// 远端不支持时自动回退到单次 PUT（日志写明）。
+	chunkedUploadEnabled atomic.Bool
+
 	// 分片下载共享 HTTP client：复用 TCP/TLS 连接（keep-alive），避免每个分片、
 	// 每次重试都新建 client→新建 Transport→重建连接，从而显著降低握手开销与
 	// 拥塞窗口重启带来的额外带宽/时间消耗。所有分片 goroutine 并发安全共用。
@@ -105,6 +109,9 @@ func NewDownloaderService(taskManager *TaskManager, wsManager *websocket.WebSock
 	ds.compressThresholdKbps.Store(int32(model.DefaultCompressBitrateThreshold))
 	ds.compressTargetKbps.Store(0)
 
+	// 初始化分片上传开关：默认关闭（单次 PUT），兼容所有 WebDAV 服务端
+	ds.chunkedUploadEnabled.Store(false)
+
 	// 分片下载共享 client：开启 keep-alive，按主机保留足够空闲连接供多并发分片复用
 	ds.segHTTPClient = &http.Client{
 		Timeout: HEAD_TIMEOUT,
@@ -118,7 +125,20 @@ func NewDownloaderService(taskManager *TaskManager, wsManager *websocket.WebSock
 		},
 	}
 
+	ds.failInterruptedTasks()
 	return ds
+}
+
+// failInterruptedTasks 将服务重启前未完成的任务标记为可重试失败。
+// 下载 goroutine 与内存控制块不会跨进程保留，保留原状态会导致任务既无法恢复也无法重试。
+func (ds *DownloaderService) failInterruptedTasks() {
+	for _, task := range ds.taskManager.ListTasks() {
+		switch task.Status {
+		case model.StatusPending, model.StatusDownloading, model.StatusMerging,
+			model.StatusCompressing, model.StatusPacking, model.StatusUploading, model.StatusPaused:
+			ds.taskManager.UpdateStatus(task.ID, model.StatusFailed, "服务重启导致任务中断，请通过重试按原任务配置恢复")
+		}
+	}
 }
 
 // SetFFmpegService 注入 ffmpeg 服务（合并阶段优先使用 ffmpeg）
@@ -184,6 +204,14 @@ func (ds *DownloaderService) UpdateCompressConfig(enabled bool, thresholdKbps, t
 
 	log.Printf("[Downloader] 高码率压缩配置已更新: 启用=%v, 阈值=%dkbps, 目标=%dkbps\n",
 		enabled, threshold, target)
+}
+
+// UpdateUploadModeConfig 开启 WebDAV 分片上传（Content-Range PUT，8MB 每块）。
+// 默认 false（单次 PUT），兼容所有 WebDAV 服务端。
+func (ds *DownloaderService) UpdateUploadModeConfig(enabled bool) {
+	ds.chunkedUploadEnabled.Store(enabled)
+	log.Printf("[Downloader] WebDAV 上传模式已更新: %s\n",
+		map[bool]string{true: "分片（Content-Range PUT, 8MB/块）", false: "单次 PUT"}[enabled])
 }
 
 // getMergeMethod 读取当前合并方式（保证非空）
@@ -300,7 +328,75 @@ func (ds *DownloaderService) removeControl(taskID string, ctrl *taskControl) {
 	}
 }
 
+// backfillLegacyTaskSnapshot 为旧版创建的缺失快照任务补齐配置：
+//   - 旧任务快照字段全为零值（字符串 ""、数值 0），重试时会导致 HLS 不启用、
+//     合并方式未知、压缩阈值为 0 被归一化为默认值等隐式退化行为。
+//   - 本函数在**首次进入重试/恢复路径**时被调用：以当前全局设置补齐所有空字段，
+//     然后持久化到 task（内存 + SQLite），确保之后该任务永远有确定的快照。
+//   - 新版任务（StartDownload 创建时就写了快照）会在 "MergeMethod != "" || HLSPackForm != ""
+//     || 压缩阈值 != 0" 任一条件命中后直接 return，保持严格的快照优先策略。
+func (ds *DownloaderService) backfillLegacyTaskSnapshot(task *model.Task) {
+	if task == nil {
+		return
+	}
+
+	// 已有快照信号 → 跳过，严格按创建时配置走
+	hasSnapshot := task.MergeMethod != "" ||
+		task.FFmpegMuxMode != "" ||
+		task.HLSPackForm != "" ||
+		task.CompressBitrateThreshold != 0
+	if hasSnapshot {
+		return
+	}
+
+	// 从当前全局设置补齐所有缺失字段
+	task.MergeAfterDownload = ds.mergeAfterDownload.Load()
+	task.MergeMethod = ds.getMergeMethod()
+	task.FFmpegMuxMode = ds.getMuxMode()
+	task.CompressAfterMerge = ds.compressAfterMerge.Load()
+	task.CompressBitrateThreshold = int(ds.compressThresholdKbps.Load())
+	task.CompressTargetBitrate = int(ds.compressTargetKbps.Load())
+	task.HLSPackEnabled = ds.hlsPackEnabled.Load()
+	task.HLSEncryptEnabled = ds.hlsEncryptEnabled.Load()
+	task.HLSEncryptMode = ds.getHLSEncryptMode()
+	task.HLSKeyURL = ds.getHLSKeyURL()
+	task.HLSPackForm = ds.getHLSPackForm()
+	task.EnableChunkedUpload = ds.chunkedUploadEnabled.Load()
+
+	// NodeOrigin 属于新建任务时才有值，旧任务补不到，保持空串即可
+	//（single/tsbin 产物的 meta.json nodeUrl 字段会为空，不影响播放器）
+
+	// 持久化到 SQLite，下次不再走补齐路径
+	ds.taskManager.UpdateTask(task)
+
+	log.Printf("[Downloader] 旧任务 %s 缺失快照，已按当前全局设置补齐（合并=%v/%s/%s, HLS=%v %s, 压缩=%v @%dkbps）\n",
+		task.ID,
+		task.MergeAfterDownload, task.MergeMethod, task.FFmpegMuxMode,
+		task.HLSPackEnabled, task.HLSPackForm,
+		task.CompressAfterMerge, task.CompressBitrateThreshold)
+}
+
+// snapshotConfigToRequest 将当前全局设置快照到 req 中，确保后续 download() 流程
+// 以及所有重试/恢复路径都按创建任务时的配置执行，不受后续全局设置变更影响。
+func (ds *DownloaderService) snapshotConfigToRequest(req *model.DownloadRequest) {
+	req.MergeAfterDownload = ds.mergeAfterDownload.Load()
+	req.MergeMethod = ds.getMergeMethod()
+	req.FFmpegMuxMode = ds.getMuxMode()
+	req.CompressAfterMerge = ds.compressAfterMerge.Load()
+	req.CompressBitrateThreshold = int(ds.compressThresholdKbps.Load())
+	req.CompressTargetBitrate = int(ds.compressTargetKbps.Load())
+	req.HLSPackEnabled = ds.hlsPackEnabled.Load()
+	req.HLSEncryptEnabled = ds.hlsEncryptEnabled.Load()
+	req.HLSEncryptMode = ds.getHLSEncryptMode()
+	req.HLSKeyURL = ds.getHLSKeyURL()
+	req.HLSPackForm = ds.getHLSPackForm()
+	req.EnableChunkedUpload = ds.chunkedUploadEnabled.Load()
+}
+
 func (ds *DownloaderService) StartDownload(req model.DownloadRequest) (*model.Task, error) {
+	// 快照当前全局设置到 req，download() 流程将从 req 读取而非全局设置
+	ds.snapshotConfigToRequest(&req)
+
 	taskID := uuid.New().String()
 	task := &model.Task{
 		ID:          taskID,
@@ -325,6 +421,21 @@ func (ds *DownloaderService) StartDownload(req model.DownloadRequest) (*model.Ta
 	task.WebDAVPassword = req.WebDAVPassword
 	task.WebDAVRemoteDir = req.WebDAVRemoteDir
 	task.DeleteAfterUpload = req.DeleteAfterUpload
+	task.EnableChunkedUpload = req.EnableChunkedUpload
+	task.NodeOrigin = req.NodeOrigin
+
+	// 保存配置快照到任务对象，重试/恢复时按快照执行
+	task.MergeAfterDownload = req.MergeAfterDownload
+	task.MergeMethod = req.MergeMethod
+	task.FFmpegMuxMode = req.FFmpegMuxMode
+	task.CompressAfterMerge = req.CompressAfterMerge
+	task.CompressBitrateThreshold = req.CompressBitrateThreshold
+	task.CompressTargetBitrate = req.CompressTargetBitrate
+	task.HLSPackEnabled = req.HLSPackEnabled
+	task.HLSEncryptEnabled = req.HLSEncryptEnabled
+	task.HLSEncryptMode = req.HLSEncryptMode
+	task.HLSKeyURL = req.HLSKeyURL
+	task.HLSPackForm = req.HLSPackForm
 
 	ds.taskManager.AddTask(task)
 	ds.createControl(taskID)

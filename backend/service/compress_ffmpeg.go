@@ -181,13 +181,13 @@ func (s *ffmpegStderrSink) history() string {
 // logFFmpegCommand 记录实际执行的命令参数（排障入口），超长截断
 
 func (ds *DownloaderService) compressIfHighBitrate(taskID, inputPath string,
-	ctrl *taskControl) (outPath string, ok, stopped bool) {
+	ctrl *taskControl, compressEnabled bool, thresholdKbps, targetKbps int) (outPath string, ok, stopped bool) {
 
-	if !ds.compressAfterMerge.Load() {
+	if !compressEnabled {
 		return inputPath, true, false
 	}
 
-	threshold := int(ds.compressThresholdKbps.Load())
+	threshold := thresholdKbps
 	if threshold < 1 {
 		threshold = model.DefaultCompressBitrateThreshold
 	}
@@ -227,7 +227,7 @@ func (ds *DownloaderService) compressIfHighBitrate(taskID, inputPath string,
 	}()
 
 	// 目标视频码率：显式配置优先，否则取阈值
-	target := int(ds.compressTargetKbps.Load())
+	target := targetKbps
 	if target < 1 {
 		target = threshold
 	}

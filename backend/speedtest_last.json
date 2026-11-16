@@ -2,17 +2,17 @@
   "state": "stopped",
   "sizeMB": 10,
   "webdavUrl": "https://webdav.123pan.cn/webdav",
-  "startedAt": "2026-10-10T00:03:58+08:00",
-  "finishedAt": "2026-10-10T00:04:06+08:00",
+  "startedAt": "2026-11-16T19:18:49+08:00",
+  "finishedAt": "2026-11-16T19:18:54+08:00",
   "perSecond": [
-    "00:03:58 [info] 开始准备 10MB 随机测试文件...",
-    "00:03:58 [info] 测试文件已生成，开始连接 WebDAV...",
-    "[ 1s] 0 KB/s",
-    "[ 2s] 96 KB/s",
-    "[ 3s] 144 KB/s",
-    "[ 4s] 176 KB/s",
-    "00:04:06 [info] 用户手动中断，远端测试文件已保留"
+    "19:18:49 [info] 开始准备 10MB 随机测试文件...",
+    "19:18:49 [info] 测试文件已生成，开始连接 WebDAV...",
+    "[ 1s] 352 KB/s",
+    "[ 2s] 512 KB/s",
+    "[ 3s] 528 KB/s",
+    "[ 4s] 432 KB/s",
+    "19:18:54 [info] 用户手动中断，远端测试文件已保留"
   ],
   "averageKbps": 0,
-  "remotePath": "/EHLS/hlsto_speedtest_1791561842129668000.bin"
+  "remotePath": "/EHLS/hlsto_speedtest_1794827929807738200.bin"
 }

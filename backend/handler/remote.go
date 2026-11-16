@@ -250,6 +250,9 @@ func (h *RemoteHandler) SaveSettings(w http.ResponseWriter, r *http.Request) {
 			newSettings.UploadConcurrency,
 			newSettings.SingleMode,
 		)
+		h.downloaderService.UpdateUploadModeConfig(
+			newSettings.EnableChunkedUpload,
+		)
 	}
 
 	OK(w, newSettings)
@@ -393,7 +396,7 @@ func (h *RemoteHandler) StartSpeedTest(w http.ResponseWriter, r *http.Request) {
 		Password:  req.WebDAVPassword,
 		RemoteDir: req.WebDAVRemoteDir,
 	}
-	if err := h.speedTestService.Start(cfg, req.SizeMB); err != nil {
+	if err := h.speedTestService.Start(cfg, req.SizeMB, false); err != nil {
 		Err(w, http.StatusConflict, err.Error())
 		return
 	}

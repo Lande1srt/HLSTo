@@ -27,18 +27,24 @@ func TestTaskCRUDRoundTrip(t *testing.T) {
 
 	workDir := filepath.Join(dir, "download_001")
 	task := &model.Task{
-		ID:          "task-1",
-		URL:         "http://example.com/a.m3u8",
-		Name:        "movie",
-		Status:      model.StatusDownloading,
-		Progress:    12.5,
-		Speed:       "1 MB/s",
-		ThreadCount: 8,
-		HostType:    "v1",
-		CreatedAt:   time.Now().Truncate(time.Second),
-		KeyPath:     filepath.Join(dir, "keys", "task-1.key"),
-		PlayURL:     "http://example.com/movie.m3u8",
-		WorkDir:     workDir,
+		ID:                 "task-1",
+		URL:                "http://example.com/a.m3u8",
+		Name:               "movie",
+		Status:             model.StatusDownloading,
+		Progress:           12.5,
+		Speed:              "1 MB/s",
+		ThreadCount:        8,
+		HostType:           "v1",
+		CreatedAt:          time.Now().Truncate(time.Second),
+		KeyPath:            filepath.Join(dir, "keys", "task-1.key"),
+		PlayURL:            "http://example.com/movie.m3u8",
+		WorkDir:            workDir,
+		NodeOrigin:         "http://node.example",
+		MergeAfterDownload: true, MergeMethod: model.MergeMethodGomedia, FFmpegMuxMode: model.MuxModeH265,
+		CompressAfterMerge: true, CompressBitrateThreshold: 4096, CompressTargetBitrate: 3000,
+		HLSPackEnabled: true, HLSEncryptEnabled: true, HLSEncryptMode: model.HLSEncryptSpecified,
+		HLSKeyURL: "http://example.com/enc.key", HLSPackForm: model.HLSPackFormSingle,
+		EnableChunkedUpload: true,
 	}
 
 	// AddTask：列/占位符/参数数量不匹配会在此直接报错
@@ -65,6 +71,13 @@ func TestTaskCRUDRoundTrip(t *testing.T) {
 	}
 	if got.ThreadCount != 8 {
 		t.Errorf("ThreadCount = %d", got.ThreadCount)
+	}
+	if !got.MergeAfterDownload || got.MergeMethod != model.MergeMethodGomedia || got.FFmpegMuxMode != model.MuxModeH265 ||
+		!got.CompressAfterMerge || got.CompressBitrateThreshold != 4096 || got.CompressTargetBitrate != 3000 ||
+		!got.HLSPackEnabled || !got.HLSEncryptEnabled || got.HLSEncryptMode != model.HLSEncryptSpecified ||
+		got.HLSKeyURL != task.HLSKeyURL || got.HLSPackForm != model.HLSPackFormSingle ||
+		!got.EnableChunkedUpload || got.NodeOrigin != task.NodeOrigin {
+		t.Errorf("任务配置快照回读不完整: %+v", got)
 	}
 
 	// GetAllTasks
@@ -98,5 +111,8 @@ func TestTaskCRUDRoundTrip(t *testing.T) {
 	}
 	if again.CompletedAt == nil {
 		t.Errorf("CompletedAt 未持久化")
+	}
+	if !again.EnableChunkedUpload || again.HLSPackForm != model.HLSPackFormSingle || again.NodeOrigin != task.NodeOrigin {
+		t.Errorf("更新后配置快照丢失: %+v", again)
 	}
 }

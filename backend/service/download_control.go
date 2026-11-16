@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -385,6 +386,9 @@ func (ds *DownloaderService) RetryDownload(taskID string, mode string) error {
 		return fmt.Errorf("任务不存在")
 	}
 
+	// 旧版任务无快照：用当前全局设置补齐并持久化，确保完整恢复流程不会被中断
+	ds.backfillLegacyTaskSnapshot(task)
+
 	if task.Status != model.StatusFailed && task.Status != model.StatusCompleted {
 		return fmt.Errorf("只有失败或已完成的任务可以重试，当前状态无法重试")
 	}
@@ -408,7 +412,7 @@ func (ds *DownloaderService) RetryDownload(taskID string, mode string) error {
 	}
 	cacheDir := filepath.Join(taskDir, "cache")
 
-	// 如果是强制合并模式，直接执行合并
+	// 如果是强制合并模式，同步执行合并，然后按快照继续走后续流程
 	if retryMode == model.RetryModeForceMerge {
 		validCount := countValidSegments(cacheDir)
 		if validCount == 0 {
@@ -419,27 +423,151 @@ func (ds *DownloaderService) RetryDownload(taskID string, mode string) error {
 		ds.sendLog(taskID, "info", fmt.Sprintf("用户选择强制合并，将基于现有 %d 个分片跳过缺失部分", validCount))
 
 		ctrl := ds.createControl(taskID)
-		// 强制合并为同步执行（本函数处于 HTTP 处理协程），结束后必须移除控制块，
-		// 否则控制块泄漏，下次重试会被"上一轮未停止"守卫永久拦截
+		// 强制合并为同步执行（本函数处于 HTTP 处理协程），结束后必须移除控制块
 		defer ds.removeControl(taskID, ctrl)
 
-		mvName := ds.mergeTs(taskID, cacheDir, taskDir, task.Name, ctrl)
-		if mvName != "" {
-			ds.sendStatus(taskID, model.StatusCompleted, "强制合并完成")
-			ds.sendLog(taskID, "info", fmt.Sprintf("视频已保存到: %s", mvName))
-			ds.taskManager.mu.Lock()
-			if t, exists := ds.taskManager.tasks[taskID]; exists {
-				t.Status = model.StatusCompleted
-				t.OutputPath = mvName
-				t.Progress = 100
-				t.Error = ""
-			}
-			ds.taskManager.mu.Unlock()
-			ds.taskManager.UpdateTask(task)
-		} else {
+		mvName := ds.mergeTs(taskID, cacheDir, taskDir, task.Name, task.MergeMethod, task.FFmpegMuxMode, ctrl)
+		if mvName == "" {
 			ds.sendStatus(taskID, model.StatusFailed, "强制合并失败")
 			return fmt.Errorf("强制合并失败（分片无效或不包含可识别音视频流）")
 		}
+
+		ds.sendStatus(taskID, model.StatusMerging, "合并完成")
+		ds.sendLog(taskID, "info", "合并完成")
+
+		if task.AutoClear {
+			if err := os.RemoveAll(cacheDir); err != nil {
+				log.Printf("[Downloader] 删除缓存目录失败: %v\n", err)
+				ds.sendLog(taskID, "warn", fmt.Sprintf("删除缓存目录失败: %v", err))
+			}
+		}
+
+		// 更新输出路径
+		ds.taskManager.mu.Lock()
+		if t, exists := ds.taskManager.tasks[taskID]; exists {
+			t.OutputPath = mvName
+		}
+		ds.taskManager.mu.Unlock()
+
+		// 暂停关卡
+		if !waitIfPaused(ctrl) {
+			return nil
+		}
+
+		// --- 高码率压缩（按快照配置）---
+		mvName, compressOK, compressStopped := ds.compressIfHighBitrate(taskID, mvName, ctrl,
+			task.CompressAfterMerge, task.CompressBitrateThreshold, task.CompressTargetBitrate)
+		if compressStopped {
+			return nil
+		}
+		if !compressOK {
+			ds.sendStatus(taskID, model.StatusFailed, "码率压缩失败，请通过重试功能处理")
+			return fmt.Errorf("码率压缩失败")
+		}
+		ds.taskManager.mu.Lock()
+		if t, exists := ds.taskManager.tasks[taskID]; exists {
+			t.OutputPath = mvName
+		}
+		ds.taskManager.mu.Unlock()
+
+		// --- 二次 HLS 分片（按快照配置）---
+		hlsDir := ""
+		if task.HLSPackEnabled {
+			if !waitIfPaused(ctrl) {
+				return nil
+			}
+
+			var packOK bool
+			hlsDir, packOK = ds.packageAsHLS(taskID, mvName, taskDir, task.Name,
+				task.HLSEncryptEnabled, task.HLSEncryptMode, task.HLSKeyURL,
+				task.HLSPackForm, task.NodeOrigin, ctrl)
+			if !packOK {
+				return fmt.Errorf("HLS 二次分片失败")
+			}
+		}
+
+		// --- 上传（按快照配置）---
+		if task.EnableWebDAV && task.WebDAVURL != "" {
+			if !waitIfPaused(ctrl) {
+				return nil
+			}
+
+			ds.sendStatus(taskID, model.StatusUploading, "正在等待上传队列...")
+			uploadSem := ds.uploadSem.Load()
+			if !uploadSem.acquire(ctrl.stopped) {
+				return nil
+			}
+			defer uploadSem.release()
+
+			ds.sendStatus(taskID, model.StatusUploading, "正在上传到 WebDAV...")
+			ds.sendLog(taskID, "info", fmt.Sprintf("开始上传到 WebDAV: %s", task.WebDAVURL))
+			ds.sendProgress(taskID, 0, "准备上传", 0, 0)
+
+			webdavConfig := WebDAVConfig{
+				Enabled:   true,
+				URL:       task.WebDAVURL,
+				Username:  task.WebDAVUsername,
+				Password:  task.WebDAVPassword,
+				RemoteDir: task.WebDAVRemoteDir,
+			}
+
+			webdavService := NewWebDAVService(webdavConfig)
+
+			var err error
+			if hlsDir != "" {
+				folderName := task.Name + "_hls"
+				err = ds.uploadHLSDirectoryWithMode(taskID, webdavService, hlsDir,
+					folderName, task.WebDAVRemoteDir, ctrl, task.EnableChunkedUpload)
+				if err == nil {
+					remoteM3U8 := path.Join(task.WebDAVRemoteDir, folderName, "index.m3u8")
+					ds.setTaskPlayURL(taskID, webdavService.PublicURL(remoteM3U8))
+				}
+			} else {
+				remoteFileName := task.Name + ".mp4"
+				err = webdavService.UploadFileWithMode(mvName, remoteFileName, ctrl.stopped, func(downloaded, total int64, speed string) {
+					progress := 0.0
+					if total > 0 {
+						progress = float64(downloaded) / float64(total) * 100
+					}
+					curKB := int(downloaded / 1024)
+					totalKB := int(total / 1024)
+					ds.sendProgress(taskID, progress, speed, curKB, totalKB)
+				}, task.EnableChunkedUpload, true)
+			}
+
+			if err != nil {
+				isStopped := false
+				select {
+				case <-ctrl.stopped:
+					isStopped = true
+				default:
+				}
+
+				if isStopped {
+					ds.sendLog(taskID, "warn", "WebDAV 上传已被用户停止")
+					ds.sendStatus(taskID, model.StatusFailed, "上传已停止")
+					return nil
+				}
+
+				ds.sendLog(taskID, "error", fmt.Sprintf("WebDAV 上传失败: %v", err))
+				ds.markTaskCompleted(taskID, mvName, fmt.Sprintf("强制合并完成但上传失败: %v", err))
+			} else {
+				ds.sendLog(taskID, "info", "WebDAV 上传成功")
+				ds.markTaskCompleted(taskID, mvName, "强制合并并上传完成")
+
+				if task.DeleteAfterUpload {
+					if err := os.RemoveAll(taskDir); err != nil {
+						log.Printf("[Downloader] 删除本地下载目录失败: %v\n", err)
+						ds.sendLog(taskID, "warn", fmt.Sprintf("删除本地下载目录失败: %v", err))
+					} else {
+						ds.sendLog(taskID, "info", "已清理本地下载目录")
+					}
+				}
+			}
+		} else {
+			ds.markTaskCompleted(taskID, mvName, "强制合并完成")
+		}
+
 		return nil
 	}
 
@@ -448,21 +576,35 @@ func (ds *DownloaderService) RetryDownload(taskID string, mode string) error {
 		task.ThreadCount = 24 // 与 HTTP 入口默认一致
 	}
 	req := model.DownloadRequest{
-		URL:               task.URL,
-		ThreadCount:       task.ThreadCount,
-		OutputName:        task.Name,
-		HostType:          task.HostType,
-		Cookie:            task.Cookie,
-		Referer:           task.Referer,
-		AutoClear:         task.AutoClear,
-		SavePath:          task.SavePath,
-		EnableWebDAV:      task.EnableWebDAV,
-		WebDAVURL:         task.WebDAVURL,
-		WebDAVUsername:    task.WebDAVUsername,
-		WebDAVPassword:    task.WebDAVPassword,
-		WebDAVRemoteDir:   task.WebDAVRemoteDir,
-		DeleteAfterUpload: task.DeleteAfterUpload,
-		RetryMode:         retryMode,
+		URL:                 task.URL,
+		ThreadCount:         task.ThreadCount,
+		OutputName:          task.Name,
+		HostType:            task.HostType,
+		Cookie:              task.Cookie,
+		Referer:             task.Referer,
+		AutoClear:           task.AutoClear,
+		SavePath:            task.SavePath,
+		EnableWebDAV:        task.EnableWebDAV,
+		WebDAVURL:           task.WebDAVURL,
+		WebDAVUsername:      task.WebDAVUsername,
+		WebDAVPassword:      task.WebDAVPassword,
+		WebDAVRemoteDir:     task.WebDAVRemoteDir,
+		DeleteAfterUpload:   task.DeleteAfterUpload,
+		EnableChunkedUpload: task.EnableChunkedUpload,
+		RetryMode:           retryMode,
+		NodeOrigin:          task.NodeOrigin,
+		// 从任务快照恢复配置，不读取当前全局设置
+		MergeAfterDownload:       task.MergeAfterDownload,
+		MergeMethod:              task.MergeMethod,
+		FFmpegMuxMode:            task.FFmpegMuxMode,
+		CompressAfterMerge:       task.CompressAfterMerge,
+		CompressBitrateThreshold: task.CompressBitrateThreshold,
+		CompressTargetBitrate:    task.CompressTargetBitrate,
+		HLSPackEnabled:           task.HLSPackEnabled,
+		HLSEncryptEnabled:        task.HLSEncryptEnabled,
+		HLSEncryptMode:           task.HLSEncryptMode,
+		HLSKeyURL:                task.HLSKeyURL,
+		HLSPackForm:              task.HLSPackForm,
 	}
 
 	// 更新任务状态并广播
@@ -506,19 +648,15 @@ func (ds *DownloaderService) UploadTaskToWebDAV(taskID string, config *WebDAVCon
 		return fmt.Errorf("任务不存在")
 	}
 
+	// 手动上传也需要补齐：旧任务可能 EnableChunkedUpload 为零值
+	ds.backfillLegacyTaskSnapshot(task)
+
 	if task.Status != model.StatusCompleted && task.Status != model.StatusFailed {
 		return fmt.Errorf("只有完成或失败的任务可以尝试上传")
 	}
 
 	if task.OutputPath == "" {
 		return fmt.Errorf("找不到本地输出文件路径，可能任务未完成或文件路径丢失")
-	}
-
-	if _, err := os.Stat(task.OutputPath); err != nil {
-		if os.IsNotExist(err) {
-			return fmt.Errorf("本地输出文件已不存在，可能已被自动清理或手动删除: %s", task.OutputPath)
-		}
-		return fmt.Errorf("无法访问本地输出文件: %w", err)
 	}
 
 	// 上一轮下载/合并/上传尚未结束时拒绝，防止重复点击产生两个上传 goroutine
@@ -544,10 +682,46 @@ func (ds *DownloaderService) UploadTaskToWebDAV(taskID string, config *WebDAVCon
 		}
 	}
 
+	// tsbin / HLS 目录：优先走 HLS 目录上传（上传 tsbin + m3u8 + meta.json 整体，避免播放器找不到 m3u8）
+	// 自动探测规则：WorkDir 下存在 *_hls 子目录且含 index.m3u8。探测不到再回退单文件 OutputPath 上传。
+	var hlsDir, folderName string
+	if task.WorkDir != "" {
+		if entries, err := os.ReadDir(task.WorkDir); err == nil {
+			for _, e := range entries {
+				if !e.IsDir() {
+					continue
+				}
+				if !strings.HasSuffix(e.Name(), "_hls") {
+					continue
+				}
+				candidate := filepath.Join(task.WorkDir, e.Name())
+				if _, err2 := os.Stat(filepath.Join(candidate, "index.m3u8")); err2 == nil {
+					hlsDir = candidate
+					folderName = e.Name()
+					break
+				}
+			}
+		}
+	}
+
+	if hlsDir != "" {
+		ds.sendLog(taskID, "info", fmt.Sprintf("检测到 HLS 目录产物（%s），将按目录整体上传", folderName))
+		go ds.uploadHLSDirectoryManual(taskID, finalConfig, hlsDir, folderName, finalConfig.RemoteDir, task.DeleteAfterUpload, task.EnableChunkedUpload)
+		return nil
+	}
+
+	if _, err := os.Stat(task.OutputPath); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("本地输出文件已不存在，可能已被自动清理或手动删除: %s", task.OutputPath)
+		}
+		return fmt.Errorf("无法访问本地输出文件: %w", err)
+	}
+
 	// 在启动 goroutine 前拷贝需要的值，避免 goroutine 中直接读共享 task 指针
 	localOutputPath := task.OutputPath
 	remoteName := filepath.Base(localOutputPath)
 	deleteAfterUpload := task.DeleteAfterUpload
+	enableChunkedUpload := task.EnableChunkedUpload
 
 	go func() {
 		ds.taskManager.mu.Lock()
@@ -561,7 +735,7 @@ func (ds *DownloaderService) UploadTaskToWebDAV(taskID string, config *WebDAVCon
 
 		ctrl := ds.createControl(taskID)
 		webdavService := NewWebDAVService(finalConfig)
-		err := webdavService.UploadFile(localOutputPath, remoteName, ctrl.stopped, func(downloaded, total int64, speed string) {
+		err := webdavService.UploadFileWithMode(localOutputPath, remoteName, ctrl.stopped, func(downloaded, total int64, speed string) {
 			progress := 0.0
 			if total > 0 {
 				progress = float64(downloaded) / float64(total) * 100
@@ -569,7 +743,7 @@ func (ds *DownloaderService) UploadTaskToWebDAV(taskID string, config *WebDAVCon
 			curKB := int(downloaded / 1024)
 			totalKB := int(total / 1024)
 			ds.sendProgress(taskID, progress, speed, curKB, totalKB)
-		})
+		}, enableChunkedUpload, true)
 
 		ds.removeControl(taskID, ctrl)
 		if err != nil {
@@ -629,6 +803,62 @@ func (ds *DownloaderService) StopDownload(taskID string) {
 		default:
 			close(ctrl.stopped)
 			ds.sendStatus(taskID, model.StatusFailed, "用户终止")
+		}
+	}
+}
+
+// uploadHLSDirectoryManual 手动上传模式下的 HLS 目录上传 goroutine 包装。
+// 与自动上传路径不同，它自己创建 ctrl、管理状态推送、完成后回写 PlayURL、
+// 可按 deleteAfterUpload 清理目录——保持与 UploadFile 单文件手动上传一致的行为。
+func (ds *DownloaderService) uploadHLSDirectoryManual(taskID string, cfg WebDAVConfig,
+	hlsDir, folderName, remoteBase string, deleteAfterUpload, chunked bool) {
+
+	ds.taskManager.mu.Lock()
+	if t, exists := ds.taskManager.tasks[taskID]; exists {
+		t.Error = ""
+	}
+	ds.taskManager.mu.Unlock()
+
+	ctrl := ds.createControl(taskID)
+	defer ds.removeControl(taskID, ctrl)
+
+	ds.sendStatus(taskID, model.StatusUploading, "正在上传 HLS 目录到 WebDAV...")
+	ds.sendLog(taskID, "info", fmt.Sprintf("开始上传 HLS 目录: %s -> %s/%s", hlsDir, cfg.URL, path.Join(remoteBase, folderName)))
+
+	svc := NewWebDAVService(cfg)
+	err := ds.uploadHLSDirectoryWithMode(taskID, svc, hlsDir, folderName, remoteBase, ctrl, chunked)
+
+	if err != nil {
+		isStopped := false
+		select {
+		case <-ctrl.stopped:
+			isStopped = true
+		default:
+		}
+
+		if isStopped {
+			ds.sendLog(taskID, "warn", "WebDAV 手动上传已被用户停止")
+			ds.sendStatus(taskID, model.StatusFailed, "上传已停止")
+			return
+		}
+
+		ds.sendLog(taskID, "error", fmt.Sprintf("WebDAV HLS 目录上传失败: %v", err))
+		ds.sendStatus(taskID, model.StatusFailed, fmt.Sprintf("WebDAV 上传失败: %v", err))
+		return
+	}
+
+	remoteM3U8 := path.Join(remoteBase, folderName, "index.m3u8")
+	ds.setTaskPlayURL(taskID, svc.PublicURL(remoteM3U8))
+
+	ds.sendLog(taskID, "info", "WebDAV HLS 目录上传成功")
+	ds.sendStatus(taskID, model.StatusCompleted, "WebDAV 上传完成")
+
+	if deleteAfterUpload {
+		if err := os.RemoveAll(hlsDir); err != nil {
+			log.Printf("[Downloader] 删除本地 HLS 目录失败: %v\n", err)
+			ds.sendLog(taskID, "warn", fmt.Sprintf("删除本地 HLS 目录失败: %v", err))
+		} else {
+			ds.sendLog(taskID, "info", "已清理本地 HLS 目录")
 		}
 	}
 }

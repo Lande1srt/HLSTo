@@ -97,6 +97,9 @@ func main() {
 			persisted.CompressBitrateThreshold,
 			persisted.CompressTargetBitrate,
 		)
+		downloaderService.UpdateUploadModeConfig(
+			persisted.EnableChunkedUpload,
+		)
 	}
 
 	taskHandler := handler.NewTaskHandler(taskManager, downloaderService)

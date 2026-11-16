@@ -37,7 +37,7 @@ COPY --from=backend-builder /app/backend/m3u8-downloader-web .
 COPY --from=backend-builder /app/backend/static ./static
 
 # 暴露端口
-EXPOSE 8080
+EXPOSE 9201
 
 # 启动命令
 CMD ["./m3u8-downloader-web"]

@@ -14,6 +14,7 @@ export interface Settings {
   webDAVPassword: string
   webDAVRemoteDir: string
   deleteAfterUpload: boolean
+  enableChunkedUpload: boolean
   taskSortOrder: string
   defaultReferer: string
   downloadConcurrency: number
@@ -54,6 +55,7 @@ export const useSettingsStore = defineStore('settings', () => {
     webDAVPassword: '',
     webDAVRemoteDir: '',
     deleteAfterUpload: false,
+    enableChunkedUpload: false,
     taskSortOrder: 'desc',
     defaultReferer: '',
     downloadConcurrency: 1,

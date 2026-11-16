@@ -9,8 +9,8 @@ import (
 	"strings"
 )
 
-func (ds *DownloaderService) uploadHLSDirectory(taskID string, svc *WebDAVService,
-	localDir, folderName, remoteBase string, ctrl *taskControl) error {
+func (ds *DownloaderService) uploadHLSDirectoryWithMode(taskID string, svc *WebDAVService,
+	localDir, folderName, remoteBase string, ctrl *taskControl, chunked bool) error {
 
 	base := remoteBase
 	if base == "" {
@@ -46,7 +46,7 @@ func (ds *DownloaderService) uploadHLSDirectory(taskID string, svc *WebDAVServic
 
 		remoteName := path.Join(folderName, f.name)
 		fileBase := uploaded
-		err := svc.UploadFile(filepath.Join(localDir, f.name), remoteName, ctrl.stopped,
+		err := svc.UploadFileWithMode(filepath.Join(localDir, f.name), remoteName, ctrl.stopped,
 			func(done int64, total int64, speed string) {
 				cur := fileBase + done
 				pct := 0.0
@@ -54,7 +54,7 @@ func (ds *DownloaderService) uploadHLSDirectory(taskID string, svc *WebDAVServic
 					pct = float64(cur) / float64(totalSize) * 100
 				}
 				ds.sendProgress(taskID, pct, speed, int(cur/1024), int(totalSize/1024))
-			})
+			}, chunked, true)
 		if err != nil {
 			return fmt.Errorf("上传 %s 失败: %w", f.name, err)
 		}

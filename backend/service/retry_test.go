@@ -1,9 +1,12 @@
 package service
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -226,12 +229,17 @@ func TestRetryDownload_ForceMergeRealSegments(t *testing.T) {
 	failed := &model.Task{
 		ID: "fm-real", URL: "http://x/a.m3u8", Name: "fm",
 		Status: model.StatusFailed, CreatedAt: time.Now(),
-		WorkDir: workDir,
+		WorkDir: workDir, MergeAfterDownload: true,
+		MergeMethod: model.MergeMethodGomedia, FFmpegMuxMode: model.MuxModeCopy,
+		HLSPackEnabled: true, HLSPackForm: model.HLSPackFormSingle,
+		NodeOrigin: "http://node.example",
 	}
 	ds.taskManager.AddTask(failed)
 
-	// gomedia 路径解析真实 TS
-	ds.UpdatePostDownloadConfig(true, model.MergeMethodGomedia, model.MuxModeCopy)
+	// 全局配置与任务快照相反，验证强制合并及后续分片只使用快照。
+	ds.SetFFmpegService(NewFFmpegService())
+	ds.UpdatePostDownloadConfig(true, model.MergeMethodFFmpeg, model.MuxModeH265)
+	ds.UpdateHLSPackConfig(false, false, model.HLSEncryptGenerated, "", model.HLSPackFormMulti)
 
 	if err := ds.RetryDownload("fm-real", string(model.RetryModeForceMerge)); err != nil {
 		t.Fatalf("强制合并失败: %v", err)
@@ -247,5 +255,191 @@ func TestRetryDownload_ForceMergeRealSegments(t *testing.T) {
 	}
 	if _, alive := ds.getControl("fm-real"); alive {
 		t.Fatal("强制合并结束后控制块未清理")
+	}
+
+	hlsDir := filepath.Join(workDir, "fm_hls")
+	indexData, err := os.ReadFile(filepath.Join(hlsDir, "index.m3u8"))
+	if err != nil || !strings.Contains(string(indexData), "EXT-X-BYTERANGE") {
+		t.Fatalf("强制合并后未生成 BYTERANGE 索引: %v", err)
+	}
+	if info, err := os.Stat(filepath.Join(hlsDir, "fm.tsbin")); err != nil || info.Size() == 0 {
+		t.Fatalf("强制合并后未生成 tsbin: %v", err)
+	}
+	metaData, err := os.ReadFile(filepath.Join(hlsDir, "meta.json"))
+	if err != nil || !strings.Contains(string(metaData), "http://node.example") {
+		t.Fatalf("重试后的 meta.json 未保留节点快照: %v", err)
+	}
+}
+
+func TestStartDownloadUsesConfigSnapshot(t *testing.T) {
+	ds, cleanup := newTestStack(t)
+	defer cleanup()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+		_, _ = w.Write([]byte("#EXTM3U\n#EXT-X-ENDLIST\n"))
+	}))
+	defer srv.Close()
+
+	ds.UpdatePostDownloadConfig(false, model.MergeMethodGomedia, model.MuxModeH265)
+	ds.UpdateCompressConfig(true, 4096, 3000)
+	ds.UpdateHLSPackConfig(true, true, model.HLSEncryptSpecified, "http://example.com/enc.key", model.HLSPackFormSingle)
+	ds.UpdateUploadModeConfig(true)
+
+	task, err := ds.StartDownload(model.DownloadRequest{
+		URL: srv.URL + "/index.m3u8", OutputName: "snapshot", ThreadCount: 1,
+		SavePath: t.TempDir(), NodeOrigin: "http://node.example",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 新建后立即改掉所有全局配置，已有任务仍必须保留并执行原快照。
+	ds.UpdatePostDownloadConfig(true, model.MergeMethodFFmpeg, model.MuxModeCopy)
+	ds.UpdateCompressConfig(false, 2048, 0)
+	ds.UpdateHLSPackConfig(false, false, model.HLSEncryptGenerated, "", model.HLSPackFormMulti)
+	ds.UpdateUploadModeConfig(false)
+
+	if task.MergeAfterDownload || task.MergeMethod != model.MergeMethodGomedia || task.FFmpegMuxMode != model.MuxModeH265 ||
+		!task.CompressAfterMerge || task.CompressBitrateThreshold != 4096 || task.CompressTargetBitrate != 3000 ||
+		!task.HLSPackEnabled || !task.HLSEncryptEnabled || task.HLSEncryptMode != model.HLSEncryptSpecified ||
+		task.HLSKeyURL != "http://example.com/enc.key" || task.HLSPackForm != model.HLSPackFormSingle ||
+		!task.EnableChunkedUpload || task.NodeOrigin != "http://node.example" {
+		t.Fatalf("任务未保存创建时的完整配置快照: %+v", task)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if current, _ := ds.taskManager.GetTask(task.ID); current.Status == model.StatusCompleted {
+			return
+		} else if current.Status == model.StatusFailed {
+			t.Fatalf("快照任务执行失败: %s", current.Error)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("任务未按创建时的“不合并”快照完成")
+}
+
+func TestInterruptedStatusesBecomeRetryable(t *testing.T) {
+	tm := NewTaskManager(nil)
+	defer tm.Close()
+
+	interrupted := []model.TaskStatus{
+		model.StatusPending, model.StatusDownloading, model.StatusMerging,
+		model.StatusCompressing, model.StatusPacking, model.StatusUploading, model.StatusPaused,
+	}
+	for _, status := range interrupted {
+		tm.AddTask(&model.Task{ID: string(status), Status: status, CreatedAt: time.Now()})
+	}
+	tm.AddTask(&model.Task{ID: "completed", Status: model.StatusCompleted, CreatedAt: time.Now()})
+
+	_ = NewDownloaderService(tm, websocket.NewWebSocketManager())
+	for _, status := range interrupted {
+		task, _ := tm.GetTask(string(status))
+		if task.Status != model.StatusFailed {
+			t.Errorf("中断状态 %s 未转为可重试失败，当前=%s", status, task.Status)
+		}
+	}
+	if task, _ := tm.GetTask("completed"); task.Status != model.StatusCompleted {
+		t.Errorf("已完成任务不应被修改，当前=%s", task.Status)
+	}
+}
+
+// TestLegacyTaskBackfillOnRetry 模拟旧版创建的任务（快照字段全为零值）：
+// 进入 RetryDownload 时补齐函数必须按当前全局设置回填所有配置并持久化，
+// 且后续第二次调用不会再改写。
+func TestLegacyTaskBackfillOnRetry(t *testing.T) {
+	ds, cleanup := newTestStack(t)
+	defer cleanup()
+
+	// 构造旧版任务：所有快照字段全为零值
+	task := &model.Task{
+		ID:        "legacy-fm",
+		Name:      "legacy",
+		Status:    model.StatusFailed,
+		Error:     "旧任务，快照缺失",
+		CreatedAt: time.Now().Add(-24 * time.Hour),
+	}
+	ds.taskManager.AddTask(task)
+
+	// 当前全局设置
+	ds.UpdatePostDownloadConfig(true, model.MergeMethodGomedia, model.MuxModeCopy)
+	ds.UpdateHLSPackConfig(true, false, model.HLSEncryptGenerated, "", model.HLSPackFormSingle)
+	ds.UpdateCompressConfig(true, 4096, 3000)
+	ds.UpdateUploadModeConfig(true)
+
+	// 直接触发补齐（模拟 RetryDownload 入口的行为）
+	ds.backfillLegacyTaskSnapshot(task)
+
+	// 补齐后字段应与当前全局设置一致
+	if !task.MergeAfterDownload || task.MergeMethod != model.MergeMethodGomedia ||
+		task.FFmpegMuxMode != model.MuxModeCopy {
+		t.Fatalf("合并配置未正确补齐: %+v", task)
+	}
+	if !task.HLSPackEnabled || task.HLSPackForm != model.HLSPackFormSingle {
+		t.Fatalf("HLS 配置未正确补齐: enabled=%v form=%q", task.HLSPackEnabled, task.HLSPackForm)
+	}
+	if !task.CompressAfterMerge || task.CompressBitrateThreshold != 4096 ||
+		task.CompressTargetBitrate != 3000 {
+		t.Fatalf("压缩配置未正确补齐: %+v", task)
+	}
+	if !task.EnableChunkedUpload {
+		t.Fatal("EnableChunkedUpload 未补齐为 true")
+	}
+
+	// 持久化验证：从 TaskManager（SQLite）重新加载
+	reloaded, _ := ds.taskManager.GetTask("legacy-fm")
+	if reloaded.MergeMethod != model.MergeMethodGomedia || reloaded.HLSPackForm != model.HLSPackFormSingle ||
+		reloaded.CompressBitrateThreshold != 4096 || !reloaded.EnableChunkedUpload {
+		t.Fatalf("补齐后未正确持久化到 SQLite: %+v", reloaded)
+	}
+
+	// 后续把全局设置完全改掉，再调补齐函数：已补齐的任务不应被改写
+	ds.UpdatePostDownloadConfig(false, model.MergeMethodFFmpeg, model.MuxModeH265)
+	ds.UpdateHLSPackConfig(false, false, model.HLSEncryptGenerated, "", model.HLSPackFormMulti)
+	ds.UpdateCompressConfig(false, 2048, 0)
+	ds.UpdateUploadModeConfig(false)
+
+	ds.backfillLegacyTaskSnapshot(task)
+	if task.MergeMethod != model.MergeMethodGomedia || task.HLSPackForm != model.HLSPackFormSingle ||
+		task.CompressBitrateThreshold != 4096 || !task.EnableChunkedUpload {
+		t.Fatalf("已补齐的任务被全局设置改写！快照优先规则被破坏: %+v", task)
+	}
+}
+
+// TestSnapshotPriorityOverLegacyBackfill 验证：
+// 新版任务（StartDownload 创建时写了快照）即使重试时全局设置已被改得完全相反，
+// 也**绝对不能**被补齐函数修改，严格遵循创建时快照。
+func TestSnapshotPriorityOverLegacyBackfill(t *testing.T) {
+	ds, cleanup := newTestStack(t)
+	defer cleanup()
+
+	ds.UpdatePostDownloadConfig(true, model.MergeMethodFFmpeg, model.MuxModeCopy)
+	ds.UpdateHLSPackConfig(true, false, model.HLSEncryptGenerated, "", model.HLSPackFormSingle)
+	ds.UpdateUploadModeConfig(true)
+
+	task, err := ds.StartDownload(model.DownloadRequest{
+		URL:          "http://127.0.0.1:1/index.m3u8", // 会失败，但快照已写入
+		OutputName:   "snap-prio",
+		ThreadCount:  1,
+		SavePath:     t.TempDir(),
+		EnableWebDAV: false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 把全局设置全部改成相反
+	ds.UpdatePostDownloadConfig(false, model.MergeMethodGomedia, model.MuxModeH265)
+	ds.UpdateHLSPackConfig(false, false, model.HLSEncryptGenerated, "", model.HLSPackFormMulti)
+	ds.UpdateUploadModeConfig(false)
+
+	// 直接调补齐函数，模拟重试入口的行为
+	ds.backfillLegacyTaskSnapshot(task)
+
+	if !task.MergeAfterDownload || task.MergeMethod != model.MergeMethodFFmpeg ||
+		task.FFmpegMuxMode != model.MuxModeCopy || !task.HLSPackEnabled ||
+		task.HLSPackForm != model.HLSPackFormSingle || !task.EnableChunkedUpload {
+		t.Fatalf("新版任务快照被补齐函数覆盖！快照优先规则被破坏: %+v", task)
 	}
 }

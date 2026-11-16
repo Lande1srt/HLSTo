@@ -16,7 +16,7 @@ import (
 	"m3u8-downloader-web/model"
 )
 
-func (ds *DownloaderService) mergeTs(taskID string, cacheDir, downloadDir, outputName string, ctrl *taskControl) string {
+func (ds *DownloaderService) mergeTs(taskID string, cacheDir, downloadDir, outputName, mergeMethod, muxMode string, ctrl *taskControl) string {
 	mvName := filepath.Join(downloadDir, outputName+".mp4")
 
 	// 收集 TS 分片（ffmpeg 与 gomedia 两条路径共用）
@@ -39,9 +39,9 @@ func (ds *DownloaderService) mergeTs(taskID string, cacheDir, downloadDir, outpu
 	}
 	ds.taskManager.mu.RUnlock()
 
-	// 解析合并方式与编码模式
-	method := ds.getMergeMethod()
-	mode := ds.getMuxMode()
+	// 使用任务创建时的合并方式与编码模式快照，兼容旧任务的空值
+	method := model.NormalizeMergeMethod(mergeMethod)
+	mode := model.NormalizeMuxMode(muxMode)
 
 	// 检测 FFmpeg 环境
 	ffmpegAvailable := false

@@ -79,8 +79,8 @@ func (s *SpeedTestService) IsRunning() bool {
 	return s.running
 }
 
-// Start 启动一次测速。sizeMB<=0 时取默认 100MB。
-func (s *SpeedTestService) Start(cfg WebDAVConfig, sizeMB int) error {
+// Start 启动一次测速。sizeMB<=0 时取默认 100MB；chunked=true 走 Content-Range PUT 分片上传（自动回退单次 PUT）。
+func (s *SpeedTestService) Start(cfg WebDAVConfig, sizeMB int, chunked bool) error {
 	s.mu.Lock()
 	if s.running {
 		s.mu.Unlock()
@@ -95,7 +95,7 @@ func (s *SpeedTestService) Start(cfg WebDAVConfig, sizeMB int) error {
 		sizeMB = speedTestDefaultSizeMB
 	}
 
-	go s.run(cfg, sizeMB, stop)
+	go s.run(cfg, sizeMB, stop, chunked)
 	return nil
 }
 
@@ -108,7 +108,7 @@ func (s *SpeedTestService) Stop() {
 	}
 }
 
-func (s *SpeedTestService) run(cfg WebDAVConfig, sizeMB int, stop chan struct{}) {
+func (s *SpeedTestService) run(cfg WebDAVConfig, sizeMB int, stop chan struct{}, chunked bool) {
 	defer func() {
 		s.mu.Lock()
 		s.running = false
@@ -179,11 +179,11 @@ func (s *SpeedTestService) run(cfg WebDAVConfig, sizeMB int, stop chan struct{})
 		}
 	}()
 
-	upErr := webdav.UploadFile(tmpFile, remoteName, stop, func(downloaded, _ int64, _ string) {
+	upErr := webdav.UploadFileWithMode(tmpFile, remoteName, stop, func(downloaded, _ int64, _ string) {
 		s.logMu.Lock()
 		logEntry.avgAccum = downloaded
 		s.logMu.Unlock()
-	})
+	}, chunked, true)
 	<-progDone
 
 	if upErr != nil {

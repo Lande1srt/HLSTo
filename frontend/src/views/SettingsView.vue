@@ -171,6 +171,7 @@ const createDefaultSettings = (): Settings => ({
   webDAVPassword: '',
   webDAVRemoteDir: '',
   deleteAfterUpload: false,
+  enableChunkedUpload: false,
   taskSortOrder: 'desc',
   defaultReferer: '',
   downloadConcurrency: 1,
@@ -1064,6 +1065,28 @@ const reset = () => {
                 class="w-4 h-4 text-primary bg-gray-200 border-gray-300 rounded" />
               <label for="deleteAfterUploadSetting" class="text-sm text-gray-600">
                 上传完成后删除本地文件
+              </label>
+            </div>
+          </div>
+        </section>
+
+        <!-- 上传模式选择（置于测速上方，便于快速切换测试目标端兼容性） -->
+        <section class="space-y-4">
+          <div class="border border-gray-200 dark:border-gray-700 rounded-lg p-4 space-y-3">
+            <div class="flex items-center justify-between flex-wrap gap-2">
+              <div>
+                <h4 class="text-sm font-semibold text-gray-800 dark:text-gray-100">WebDAV 上传模式</h4>
+                <p class="text-xs text-gray-500 mt-1">
+                  默认单次 PUT；开启后按 8MB + Content-Range 分块 PUT，失败自动回退。
+                  下方测速可立即验证目标端是否支持。
+                </p>
+              </div>
+            </div>
+            <div class="flex items-center space-x-2">
+              <input v-model="settings.enableChunkedUpload" type="checkbox" id="enableChunkedUploadSetting"
+                class="w-4 h-4 text-primary bg-gray-200 border-gray-300 rounded" />
+              <label for="enableChunkedUploadSetting" class="text-sm text-gray-600">
+                使用 Content-Range 分片上传（每块 8MB）
               </label>
             </div>
           </div>

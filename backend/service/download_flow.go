@@ -159,7 +159,7 @@ func (ds *DownloaderService) download(taskID string, req model.DownloadRequest) 
 
 		// 用户关闭"下载完成后合并"：保留 TS 分片作为产物，任务完成；
 		// 按确认结论不允许二次 HLS 分片与上传
-		if !ds.mergeAfterDownload.Load() {
+		if !req.MergeAfterDownload {
 			ds.taskManager.mu.Lock()
 			if t, exists := ds.taskManager.tasks[taskID]; exists {
 				t.OutputPath = cacheDir
@@ -196,7 +196,7 @@ func (ds *DownloaderService) download(taskID string, req model.DownloadRequest) 
 
 		ds.sendStatus(taskID, model.StatusMerging, "正在合并文件...")
 		ds.sendProgress(taskID, 0, "开始合并", 0, 0)
-		mv = ds.mergeTs(taskID, cacheDir, downloadDir, req.OutputName, ctrl)
+		mv = ds.mergeTs(taskID, cacheDir, downloadDir, req.OutputName, req.MergeMethod, req.FFmpegMuxMode, ctrl)
 
 		if mv == "" {
 			// 说明合并被停止或出错
@@ -257,7 +257,8 @@ func (ds *DownloaderService) download(taskID string, req model.DownloadRequest) 
 	}
 
 	// --- 阶段 2.4: 高码率压缩（可选，依赖 FFmpeg；在 HLS 分片/上传之前）---
-	mv, compressOK, compressStopped := ds.compressIfHighBitrate(taskID, mv, ctrl)
+	mv, compressOK, compressStopped := ds.compressIfHighBitrate(taskID, mv, ctrl,
+		req.CompressAfterMerge, req.CompressBitrateThreshold, req.CompressTargetBitrate)
 	if compressStopped {
 		return
 	}
@@ -273,7 +274,7 @@ func (ds *DownloaderService) download(taskID string, req model.DownloadRequest) 
 
 	// --- 阶段 2.5: 二次 HLS 分片（可选，依赖 FFmpeg）---
 	hlsDir := ""
-	if ds.hlsPackEnabled.Load() {
+	if req.HLSPackEnabled {
 		// 暂停关卡：压缩结束、进入二次分片前。被停止则直接退出
 		if !waitIfPaused(ctrl) {
 			return
@@ -281,8 +282,8 @@ func (ds *DownloaderService) download(taskID string, req model.DownloadRequest) 
 
 		var packOK bool
 		hlsDir, packOK = ds.packageAsHLS(taskID, mv, downloadDir, req.OutputName,
-			ds.hlsEncryptEnabled.Load(), ds.getHLSEncryptMode(), ds.getHLSKeyURL(),
-			ds.getHLSPackForm(), req.NodeOrigin, ctrl)
+			req.HLSEncryptEnabled, req.HLSEncryptMode, req.HLSKeyURL,
+			req.HLSPackForm, req.NodeOrigin, ctrl)
 		if !packOK {
 			return
 		}
@@ -323,8 +324,8 @@ func (ds *DownloaderService) download(taskID string, req model.DownloadRequest) 
 		if hlsDir != "" {
 			// 二次 HLS 分片开启：上传整个 HLS 目录（m3u8 + 分片，密钥按策略剔除）
 			folderName := req.OutputName + "_hls"
-			err = ds.uploadHLSDirectory(taskID, webdavService, hlsDir,
-				folderName, req.WebDAVRemoteDir, ctrl)
+			err = ds.uploadHLSDirectoryWithMode(taskID, webdavService, hlsDir,
+				folderName, req.WebDAVRemoteDir, ctrl, req.EnableChunkedUpload)
 			if err == nil {
 				// 回写可播放 m3u8 地址（含 BYTERANGE 或目录两种形态，路径一致）
 				remoteM3U8 := path.Join(req.WebDAVRemoteDir, folderName, "index.m3u8")
@@ -336,16 +337,15 @@ func (ds *DownloaderService) download(taskID string, req model.DownloadRequest) 
 				remoteFileName = filepath.Base(mv)
 			}
 
-			err = webdavService.UploadFile(mv, remoteFileName, ctrl.stopped, func(downloaded, total int64, speed string) {
+			err = webdavService.UploadFileWithMode(mv, remoteFileName, ctrl.stopped, func(downloaded, total int64, speed string) {
 				progress := 0.0
 				if total > 0 {
 					progress = float64(downloaded) / float64(total) * 100
 				}
-				// 将字节转换为 KB 以便在前端显示，KB 比较稳妥且能显示更多细节
 				curKB := int(downloaded / 1024)
 				totalKB := int(total / 1024)
 				ds.sendProgress(taskID, progress, speed, curKB, totalKB)
-			})
+			}, req.EnableChunkedUpload, true)
 		}
 
 		if err != nil {
