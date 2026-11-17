@@ -63,6 +63,7 @@ type Task struct {
 	MergeAfterDownload       bool   `json:"mergeAfterDownload"`
 	MergeMethod              string `json:"mergeMethod"`
 	FFmpegMuxMode            string `json:"ffmpegMuxMode"`
+	MergeAllowMissingSeg     int    `json:"mergeAllowMissingSeg"` // 允许的最大缺失分片数，默认 0；≤此数时仍走合并+后续流程
 	CompressAfterMerge       bool   `json:"compressAfterMerge"`
 	CompressBitrateThreshold int    `json:"compressBitrateThreshold"`
 	CompressTargetBitrate    int    `json:"compressTargetBitrate"`
@@ -97,6 +98,7 @@ type DownloadRequest struct {
 	MergeAfterDownload       bool   `json:"mergeAfterDownload"`
 	MergeMethod              string `json:"mergeMethod"`
 	FFmpegMuxMode            string `json:"ffmpegMuxMode"`
+	MergeAllowMissingSeg     int    `json:"mergeAllowMissingSeg"`
 	CompressAfterMerge       bool   `json:"compressAfterMerge"`
 	CompressBitrateThreshold int    `json:"compressBitrateThreshold"`
 	CompressTargetBitrate    int    `json:"compressTargetBitrate"`
@@ -158,6 +160,10 @@ type PostDownloadSettings struct {
 	MergeMethod string `json:"mergeMethod"`
 	// FFmpegMuxMode FFmpeg 处理时的编码模式：copy / h264 / h265
 	FFmpegMuxMode string `json:"ffmpegMuxMode"`
+	// MergeAllowMissingSeg 允许的最大缺失分片数，默认 0（必须全到齐）；
+	// 下载阶段自动重试完成后，若剩余缺失分片数 ≤ 此阈值，则不报错，继续合并 + 后续流程。
+	// 设为 -1 表示"容忍任意数量缺失"（一般不建议）。
+	MergeAllowMissingSeg int `json:"mergeAllowMissingSeg"`
 }
 
 // 默认高码率压缩阈值（kbps）

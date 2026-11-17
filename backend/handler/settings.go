@@ -143,6 +143,9 @@ func (h *SettingsHandler) SaveSettings(w http.ResponseWriter, r *http.Request) {
 	newSettings.FFmpegMuxMode = model.NormalizeMuxMode(newSettings.FFmpegMuxMode)
 	newSettings.HLSEncryptMode = model.NormalizeHLSEncryptMode(newSettings.HLSEncryptMode)
 	newSettings.HLSPackForm = model.NormalizeHLSPackForm(newSettings.HLSPackForm)
+	if newSettings.MergeAllowMissingSeg < 0 {
+		newSettings.MergeAllowMissingSeg = 0
+	}
 
 	// 加密以二次 HLS 分片开启为前提
 	if newSettings.HLSEncryptEnabled && !newSettings.HLSPackEnabled {
@@ -191,6 +194,7 @@ func (h *SettingsHandler) SaveSettings(w http.ResponseWriter, r *http.Request) {
 			newSettings.MergeAfterDownload,
 			newSettings.MergeMethod,
 			newSettings.FFmpegMuxMode,
+			newSettings.MergeAllowMissingSeg,
 		)
 		h.downloaderService.UpdateHLSPackConfig(
 			newSettings.HLSPackEnabled,

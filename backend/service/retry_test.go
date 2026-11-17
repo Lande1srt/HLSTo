@@ -1,4 +1,4 @@
-package service
+﻿package service
 
 import (
 	"net/http"
@@ -161,7 +161,7 @@ func TestRetryDownload_ForceMergeInvalidContent(t *testing.T) {
 	}
 	ds.taskManager.AddTask(failed)
 
-	ds.UpdatePostDownloadConfig(true, model.MergeMethodGomedia, model.MuxModeCopy)
+	ds.UpdatePostDownloadConfig(true, model.MergeMethodGomedia, model.MuxModeCopy, 0)
 
 	if err := ds.RetryDownload("fm-bad", string(model.RetryModeForceMerge)); err == nil {
 		t.Fatal("非 TS 内容强制合并应失败")
@@ -238,7 +238,7 @@ func TestRetryDownload_ForceMergeRealSegments(t *testing.T) {
 
 	// 全局配置与任务快照相反，验证强制合并及后续分片只使用快照。
 	ds.SetFFmpegService(NewFFmpegService())
-	ds.UpdatePostDownloadConfig(true, model.MergeMethodFFmpeg, model.MuxModeH265)
+	ds.UpdatePostDownloadConfig(true, model.MergeMethodFFmpeg, model.MuxModeH265, 0)
 	ds.UpdateHLSPackConfig(false, false, model.HLSEncryptGenerated, "", model.HLSPackFormMulti)
 
 	if err := ds.RetryDownload("fm-real", string(model.RetryModeForceMerge)); err != nil {
@@ -281,7 +281,7 @@ func TestStartDownloadUsesConfigSnapshot(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	ds.UpdatePostDownloadConfig(false, model.MergeMethodGomedia, model.MuxModeH265)
+	ds.UpdatePostDownloadConfig(false, model.MergeMethodGomedia, model.MuxModeH265, 0)
 	ds.UpdateCompressConfig(true, 4096, 3000)
 	ds.UpdateHLSPackConfig(true, true, model.HLSEncryptSpecified, "http://example.com/enc.key", model.HLSPackFormSingle)
 	ds.UpdateUploadModeConfig(true)
@@ -295,7 +295,7 @@ func TestStartDownloadUsesConfigSnapshot(t *testing.T) {
 	}
 
 	// 新建后立即改掉所有全局配置，已有任务仍必须保留并执行原快照。
-	ds.UpdatePostDownloadConfig(true, model.MergeMethodFFmpeg, model.MuxModeCopy)
+	ds.UpdatePostDownloadConfig(true, model.MergeMethodFFmpeg, model.MuxModeCopy, 0)
 	ds.UpdateCompressConfig(false, 2048, 0)
 	ds.UpdateHLSPackConfig(false, false, model.HLSEncryptGenerated, "", model.HLSPackFormMulti)
 	ds.UpdateUploadModeConfig(false)
@@ -363,7 +363,7 @@ func TestLegacyTaskBackfillOnRetry(t *testing.T) {
 	ds.taskManager.AddTask(task)
 
 	// 当前全局设置
-	ds.UpdatePostDownloadConfig(true, model.MergeMethodGomedia, model.MuxModeCopy)
+	ds.UpdatePostDownloadConfig(true, model.MergeMethodGomedia, model.MuxModeCopy, 0)
 	ds.UpdateHLSPackConfig(true, false, model.HLSEncryptGenerated, "", model.HLSPackFormSingle)
 	ds.UpdateCompressConfig(true, 4096, 3000)
 	ds.UpdateUploadModeConfig(true)
@@ -395,7 +395,7 @@ func TestLegacyTaskBackfillOnRetry(t *testing.T) {
 	}
 
 	// 后续把全局设置完全改掉，再调补齐函数：已补齐的任务不应被改写
-	ds.UpdatePostDownloadConfig(false, model.MergeMethodFFmpeg, model.MuxModeH265)
+	ds.UpdatePostDownloadConfig(false, model.MergeMethodFFmpeg, model.MuxModeH265, 0)
 	ds.UpdateHLSPackConfig(false, false, model.HLSEncryptGenerated, "", model.HLSPackFormMulti)
 	ds.UpdateCompressConfig(false, 2048, 0)
 	ds.UpdateUploadModeConfig(false)
@@ -414,7 +414,7 @@ func TestSnapshotPriorityOverLegacyBackfill(t *testing.T) {
 	ds, cleanup := newTestStack(t)
 	defer cleanup()
 
-	ds.UpdatePostDownloadConfig(true, model.MergeMethodFFmpeg, model.MuxModeCopy)
+	ds.UpdatePostDownloadConfig(true, model.MergeMethodFFmpeg, model.MuxModeCopy, 0)
 	ds.UpdateHLSPackConfig(true, false, model.HLSEncryptGenerated, "", model.HLSPackFormSingle)
 	ds.UpdateUploadModeConfig(true)
 
@@ -430,7 +430,7 @@ func TestSnapshotPriorityOverLegacyBackfill(t *testing.T) {
 	}
 
 	// 把全局设置全部改成相反
-	ds.UpdatePostDownloadConfig(false, model.MergeMethodGomedia, model.MuxModeH265)
+	ds.UpdatePostDownloadConfig(false, model.MergeMethodGomedia, model.MuxModeH265, 0)
 	ds.UpdateHLSPackConfig(false, false, model.HLSEncryptGenerated, "", model.HLSPackFormMulti)
 	ds.UpdateUploadModeConfig(false)
 

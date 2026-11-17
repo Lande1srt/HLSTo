@@ -1,4 +1,4 @@
-package service
+﻿package service
 
 import (
 	"fmt"
@@ -60,7 +60,7 @@ func TestPausedTaskDoesNotBlockOthers(t *testing.T) {
 	// 下载并发=1（默认即 1，这里显式设置），关闭合并/压缩/分片/上传
 	ds.downloadConcurrency.Store(1)
 	ds.downloadSem.Load().resize(1)
-	ds.UpdatePostDownloadConfig(false, model.MergeMethodAuto, model.MuxModeCopy)
+	ds.UpdatePostDownloadConfig(false, model.MergeMethodAuto, model.MuxModeCopy, 0)
 	saveDir := t.TempDir()
 
 	// 任务 A 启动；其分片请求会阻塞在 gate

@@ -45,6 +45,7 @@ type DownloaderService struct {
 	mergeAfterDownload atomic.Bool
 	mergeMethod        atomic.Pointer[string]
 	ffmpegMuxMode      atomic.Pointer[string]
+	mergeAllowMissingSeg atomic.Int32
 
 	// 下载完成动作：二次 HLS 分片与加密（默认关闭）
 	hlsPackEnabled    atomic.Bool
@@ -97,6 +98,7 @@ func NewDownloaderService(taskManager *TaskManager, wsManager *websocket.WebSock
 	ds.mergeMethod.Store(&autoMethod)
 	defaultMode := model.MuxModeCopy
 	ds.ffmpegMuxMode.Store(&defaultMode)
+	ds.mergeAllowMissingSeg.Store(0)
 
 	// 初始化二次 HLS 配置：默认关闭，加密默认生成独立密钥
 	generatedMode := model.HLSEncryptGenerated
@@ -149,18 +151,23 @@ func (ds *DownloaderService) SetFFmpegService(fs *FFmpegService) {
 
 // UpdatePostDownloadConfig 更新下载完成后的合并配置；参数会被合法化
 
-func (ds *DownloaderService) UpdatePostDownloadConfig(after bool, method, mode string) {
+func (ds *DownloaderService) UpdatePostDownloadConfig(after bool, method, mode string, allowMissingSeg int) {
 	normalizedMethod := model.NormalizeMergeMethod(method)
 	normalizedMode := model.NormalizeMuxMode(mode)
+
+	if allowMissingSeg < 0 {
+		allowMissingSeg = 0
+	}
 
 	ds.mergeAfterDownload.Store(after)
 	methodCopy := normalizedMethod
 	ds.mergeMethod.Store(&methodCopy)
 	modeCopy := normalizedMode
 	ds.ffmpegMuxMode.Store(&modeCopy)
+	ds.mergeAllowMissingSeg.Store(int32(allowMissingSeg))
 
-	log.Printf("[Downloader] 合并配置已更新: 合并=%v, 方式=%s, 编码模式=%s\n",
-		after, normalizedMethod, normalizedMode)
+	log.Printf("[Downloader] 合并配置已更新: 合并=%v, 方式=%s, 编码模式=%s, 允许缺失分片=%d\n",
+		after, normalizedMethod, normalizedMode, allowMissingSeg)
 }
 
 // UpdateHLSPackConfig 更新二次 HLS 分片与加密配置；参数会被合法化
@@ -353,6 +360,7 @@ func (ds *DownloaderService) backfillLegacyTaskSnapshot(task *model.Task) {
 	task.MergeAfterDownload = ds.mergeAfterDownload.Load()
 	task.MergeMethod = ds.getMergeMethod()
 	task.FFmpegMuxMode = ds.getMuxMode()
+	task.MergeAllowMissingSeg = int(ds.mergeAllowMissingSeg.Load())
 	task.CompressAfterMerge = ds.compressAfterMerge.Load()
 	task.CompressBitrateThreshold = int(ds.compressThresholdKbps.Load())
 	task.CompressTargetBitrate = int(ds.compressTargetKbps.Load())
@@ -382,6 +390,7 @@ func (ds *DownloaderService) snapshotConfigToRequest(req *model.DownloadRequest)
 	req.MergeAfterDownload = ds.mergeAfterDownload.Load()
 	req.MergeMethod = ds.getMergeMethod()
 	req.FFmpegMuxMode = ds.getMuxMode()
+	req.MergeAllowMissingSeg = int(ds.mergeAllowMissingSeg.Load())
 	req.CompressAfterMerge = ds.compressAfterMerge.Load()
 	req.CompressBitrateThreshold = int(ds.compressThresholdKbps.Load())
 	req.CompressTargetBitrate = int(ds.compressTargetKbps.Load())
@@ -428,6 +437,7 @@ func (ds *DownloaderService) StartDownload(req model.DownloadRequest) (*model.Ta
 	task.MergeAfterDownload = req.MergeAfterDownload
 	task.MergeMethod = req.MergeMethod
 	task.FFmpegMuxMode = req.FFmpegMuxMode
+	task.MergeAllowMissingSeg = req.MergeAllowMissingSeg
 	task.CompressAfterMerge = req.CompressAfterMerge
 	task.CompressBitrateThreshold = req.CompressBitrateThreshold
 	task.CompressTargetBitrate = req.CompressTargetBitrate

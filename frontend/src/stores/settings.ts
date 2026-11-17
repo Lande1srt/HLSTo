@@ -30,6 +30,7 @@ export interface Settings {
   mergeAfterDownload: boolean
   mergeMethod: string // auto(默认,检测ffmpeg兜底go) / ffmpeg / gomedia
   ffmpegMuxMode: string // copy(源流式复制) / h264 / h265（ffmpeg处理时生效）
+  mergeAllowMissingSeg: number // 最大允许忽略的缺失分片数，默认 0；下载自动重试完成后若缺失数 ≤ 此值则继续合并
   // 下载完成动作：二次 HLS 分片与加密
   hlsPackEnabled: boolean
   hlsEncryptEnabled: boolean
@@ -70,6 +71,7 @@ export const useSettingsStore = defineStore('settings', () => {
     mergeAfterDownload: true,
     mergeMethod: 'auto',
     ffmpegMuxMode: 'copy',
+    mergeAllowMissingSeg: 0,
     hlsPackEnabled: false,
     hlsEncryptEnabled: false,
     hlsEncryptMode: 'generated',

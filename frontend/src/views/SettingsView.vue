@@ -186,6 +186,7 @@ const createDefaultSettings = (): Settings => ({
   mergeAfterDownload: true,
   mergeMethod: 'auto',
   ffmpegMuxMode: 'copy',
+  mergeAllowMissingSeg: 0,
   hlsPackEnabled: false,
   hlsEncryptEnabled: false,
   hlsEncryptMode: 'generated',
@@ -829,6 +830,20 @@ const reset = () => {
                   <span class="block text-xs text-gray-500">libx265 编码，文件体积更小，耗时最长</span>
                 </span>
               </label>
+            </div>
+
+            <!-- 最大允许忽略的缺失分片数 -->
+            <div class="space-y-2">
+              <label class="block text-sm font-medium text-gray-600">最大允许忽略的缺失分片数</label>
+              <div class="flex items-center gap-3">
+                <input v-model.number="settings.mergeAllowMissingSeg" type="number" min="0" step="1"
+                  class="w-32 px-3 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-primary focus:border-primary dark:bg-gray-800 dark:border-gray-600 dark:text-gray-100" />
+                <span class="text-xs text-gray-500">个分片</span>
+              </div>
+              <p class="text-xs text-gray-500">
+                默认 <b>0</b>（必须全部下载完成）。下载阶段自动重试结束后，若剩余缺失分片数 ≤ 此值，则跳过失败判定，继续走合并与后续流程；
+                超过此阈值仍视为失败，等用户手动强制合并。适用于源站偶发少量分片被封或 404 的场景。
+              </p>
             </div>
           </div>
         </section>

@@ -84,6 +84,7 @@ func main() {
 			persisted.MergeAfterDownload,
 			persisted.MergeMethod,
 			persisted.FFmpegMuxMode,
+			persisted.MergeAllowMissingSeg,
 		)
 		downloaderService.UpdateHLSPackConfig(
 			persisted.HLSPackEnabled,

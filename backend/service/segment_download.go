@@ -180,7 +180,7 @@ func (ds *DownloaderService) downloadTsFile(taskID string, ts TsInfo, downloadDi
 //   - holding：返回 false 时表示因暂停期间让出且最终未重新持有 downloadSem
 //     （仅当被停止），外层收尾 defer 必须跳过对 downloadSem 的释放，避免误释放他人许可。
 
-func (ds *DownloaderService) downloader(taskID string, maxGoroutines int, key string, cacheDir string, tsList []TsInfo, ctrl *taskControl, referer string, cookie string, downloadSem *semaphore) (ok bool, holding bool) {
+func (ds *DownloaderService) downloader(taskID string, maxGoroutines int, key string, cacheDir string, tsList []TsInfo, ctrl *taskControl, referer string, cookie string, downloadSem *semaphore, allowMissing int) (ok bool, holding bool) {
 	holding = true
 	retry := 3
 	// 防御：并发数非法（老任务/异常配置为 0）会导致无缓冲 limiter 死锁，强制兜底为 1
@@ -286,6 +286,12 @@ func (ds *DownloaderService) downloader(taskID string, maxGoroutines int, key st
 	}
 
 	if len(missingTs) > 0 {
+		if allowMissing > 0 && len(missingTs) <= allowMissing {
+			ds.sendLog(taskID, "warn", fmt.Sprintf(
+				"仍有 %d 个分片缺失，在允许的最大缺失范围（%d）内，继续后续合并流程",
+				len(missingTs), allowMissing))
+			return true, holding
+		}
 		ds.sendLog(taskID, "error", fmt.Sprintf("下载失败，仍有 %d 个分片无法下载", len(missingTs)))
 		ds.sendStatus(taskID, model.StatusFailed, fmt.Sprintf("分片丢失: %d 个", len(missingTs)))
 		return false, holding
@@ -294,7 +300,7 @@ func (ds *DownloaderService) downloader(taskID string, maxGoroutines int, key st
 	return true, holding
 }
 
-func (ds *DownloaderService) checkTsDownDir(taskID string, dir string, tsList []TsInfo, forceMerge bool) bool {
+func (ds *DownloaderService) checkTsDownDir(taskID string, dir string, tsList []TsInfo, forceMerge bool, allowMissing int) bool {
 	if forceMerge {
 		ds.sendLog(taskID, "warn", "强制合并模式：跳过完整性检查")
 		return true
@@ -309,11 +315,18 @@ func (ds *DownloaderService) checkTsDownDir(taskID string, dir string, tsList []
 		}
 	}
 
-	if missingCount > 0 {
-		ds.sendLog(taskID, "error", fmt.Sprintf("完整性检查失败：缺失或空分片 %d 个", missingCount))
-		return false
+	if missingCount == 0 {
+		ds.sendLog(taskID, "info", "文件完整性检查通过，开始合并...")
+		return true
 	}
 
-	ds.sendLog(taskID, "info", "文件完整性检查通过，开始合并...")
-	return true
+	if missingCount <= allowMissing && allowMissing > 0 {
+		ds.sendLog(taskID, "warn", fmt.Sprintf(
+			"完整性检查：缺失或空分片 %d 个，在允许的最大缺失范围（%d）内，继续后续合并流程",
+			missingCount, allowMissing))
+		return true
+	}
+
+	ds.sendLog(taskID, "error", fmt.Sprintf("完整性检查失败：缺失或空分片 %d 个", missingCount))
+	return false
 }

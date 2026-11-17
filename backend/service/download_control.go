@@ -597,6 +597,7 @@ func (ds *DownloaderService) RetryDownload(taskID string, mode string) error {
 		MergeAfterDownload:       task.MergeAfterDownload,
 		MergeMethod:              task.MergeMethod,
 		FFmpegMuxMode:            task.FFmpegMuxMode,
+		MergeAllowMissingSeg:     task.MergeAllowMissingSeg,
 		CompressAfterMerge:       task.CompressAfterMerge,
 		CompressBitrateThreshold: task.CompressBitrateThreshold,
 		CompressTargetBitrate:    task.CompressTargetBitrate,

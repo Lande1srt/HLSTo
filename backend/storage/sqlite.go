@@ -144,6 +144,7 @@ func createTables(db *sql.DB) error {
 		default_referer TEXT DEFAULT '',
 		ffmpeg_mux_enabled BOOLEAN DEFAULT 0,
 		ffmpeg_mux_mode TEXT DEFAULT 'copy',
+		merge_allow_missing_seg INTEGER DEFAULT 0,
 		force_ffmpeg_mux BOOLEAN DEFAULT 0,
 		merge_after_download BOOLEAN DEFAULT 1,
 		merge_method TEXT DEFAULT 'auto',
@@ -204,6 +205,7 @@ func migrateTasksTable(db *sql.DB) {
 		"merge_after_download":       "BOOLEAN DEFAULT 1",
 		"merge_method":               "TEXT DEFAULT 'auto'",
 		"ffmpeg_mux_mode":            "TEXT DEFAULT 'copy'",
+		"merge_allow_missing_seg":   "INTEGER DEFAULT 0",
 		"compress_after_merge":       "BOOLEAN DEFAULT 0",
 		"compress_bitrate_threshold": "INTEGER DEFAULT 2048",
 		"compress_target_bitrate":    "INTEGER DEFAULT 0",
@@ -241,6 +243,7 @@ func migrateSettingsTable(db *sql.DB) {
 		"disk_refresh_interval":      "INTEGER DEFAULT 10",
 		"ffmpeg_mux_enabled":         "BOOLEAN DEFAULT 0",
 		"ffmpeg_mux_mode":            "TEXT DEFAULT 'copy'",
+		"merge_allow_missing_seg":   "INTEGER DEFAULT 0",
 		"force_ffmpeg_mux":           "BOOLEAN DEFAULT 0",
 		"merge_after_download":       "BOOLEAN DEFAULT 1",
 		"merge_method":               "TEXT DEFAULT 'auto'",
@@ -294,7 +297,7 @@ func (s *SQLiteStorage) GetSettings() (*model.Settings, error) {
 		download_concurrency, merge_concurrency, compress_concurrency,
 		pack_concurrency, upload_concurrency, single_mode,
 		enable_pre_download_check, min_free_space_mb, disk_refresh_interval,
-		merge_after_download, merge_method, ffmpeg_mux_mode,
+		merge_after_download, merge_method, ffmpeg_mux_mode, merge_allow_missing_seg,
 		hls_pack_enabled, hls_encrypt_enabled, hls_encrypt_mode, hls_key_url,
 		hls_pack_form, compress_after_merge, compress_bitrate_threshold,
 		compress_target_bitrate
@@ -360,6 +363,7 @@ func (s *SQLiteStorage) GetSettings() (*model.Settings, error) {
 		&settings.MergeAfterDownload,
 		&settings.MergeMethod,
 		&settings.FFmpegMuxMode,
+		&settings.MergeAllowMissingSeg,
 		&settings.HLSPackEnabled,
 		&settings.HLSEncryptEnabled,
 		&settings.HLSEncryptMode,
@@ -406,6 +410,7 @@ func (s *SQLiteStorage) SaveSettings(settings *model.Settings) error {
 		merge_after_download = ?,
 		merge_method = ?,
 		ffmpeg_mux_mode = ?,
+		merge_allow_missing_seg = ?,
 		hls_pack_enabled = ?,
 		hls_encrypt_enabled = ?,
 		hls_encrypt_mode = ?,
@@ -445,6 +450,7 @@ func (s *SQLiteStorage) SaveSettings(settings *model.Settings) error {
 		settings.MergeAfterDownload,
 		settings.MergeMethod,
 		settings.FFmpegMuxMode,
+		settings.MergeAllowMissingSeg,
 		settings.HLSPackEnabled,
 		settings.HLSEncryptEnabled,
 		settings.HLSEncryptMode,
@@ -467,11 +473,11 @@ func (s *SQLiteStorage) AddTask(task *model.Task) error {
 		webdav_remote_dir, delete_after_upload,
 		total_segments, downloaded_segments, total_bytes, downloaded_bytes,
 		key_path, play_url, work_dir, created_at,
-		merge_after_download, merge_method, ffmpeg_mux_mode,
+		merge_after_download, merge_method, ffmpeg_mux_mode, merge_allow_missing_seg,
 		compress_after_merge, compress_bitrate_threshold, compress_target_bitrate,
 		hls_pack_enabled, hls_encrypt_enabled, hls_encrypt_mode, hls_key_url, hls_pack_form,
 		enable_chunked_upload, node_origin
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 
 	_, err := s.db.Exec(
@@ -505,6 +511,7 @@ func (s *SQLiteStorage) AddTask(task *model.Task) error {
 		task.MergeAfterDownload,
 		task.MergeMethod,
 		task.FFmpegMuxMode,
+		task.MergeAllowMissingSeg,
 		task.CompressAfterMerge,
 		task.CompressBitrateThreshold,
 		task.CompressTargetBitrate,
@@ -544,6 +551,7 @@ func (s *SQLiteStorage) UpdateTask(task *model.Task) error {
 		merge_after_download = ?,
 		merge_method = ?,
 		ffmpeg_mux_mode = ?,
+		merge_allow_missing_seg = ?,
 		compress_after_merge = ?,
 		compress_bitrate_threshold = ?,
 		compress_target_bitrate = ?,
@@ -585,6 +593,7 @@ func (s *SQLiteStorage) UpdateTask(task *model.Task) error {
 		task.MergeAfterDownload,
 		task.MergeMethod,
 		task.FFmpegMuxMode,
+		task.MergeAllowMissingSeg,
 		task.CompressAfterMerge,
 		task.CompressBitrateThreshold,
 		task.CompressTargetBitrate,
@@ -604,18 +613,18 @@ func (s *SQLiteStorage) UpdateTask(task *model.Task) error {
 func (s *SQLiteStorage) GetTask(taskID string) (*model.Task, error) {
 	query := `
 SELECT
-		id, url, name, status, progress, speed,
-		thread_count, host_type, cookie, referer, auto_clear, save_path,
-		COALESCE(output_path, ''), enable_webdav, webdav_url, webdav_username,
-		webdav_password, webdav_remote_dir, delete_after_upload,
-		total_segments, downloaded_segments, key_path, play_url, work_dir,
-		created_at, COALESCE(completed_at, ''),
-		merge_after_download, merge_method, ffmpeg_mux_mode,
-		compress_after_merge, compress_bitrate_threshold, compress_target_bitrate,
-		hls_pack_enabled, hls_encrypt_enabled, hls_encrypt_mode, hls_key_url, hls_pack_form,
-		enable_chunked_upload, node_origin
-	FROM tasks WHERE id = ?
-	`
+	id, url, name, status, progress, speed,
+	thread_count, host_type, cookie, referer, auto_clear, save_path,
+	COALESCE(output_path, ''), enable_webdav, webdav_url, webdav_username,
+	webdav_password, webdav_remote_dir, delete_after_upload,
+	total_segments, downloaded_segments, key_path, play_url, work_dir,
+	created_at, COALESCE(completed_at, ''),
+	merge_after_download, merge_method, ffmpeg_mux_mode, merge_allow_missing_seg,
+	compress_after_merge, compress_bitrate_threshold, compress_target_bitrate,
+	hls_pack_enabled, hls_encrypt_enabled, hls_encrypt_mode, hls_key_url, hls_pack_form,
+	enable_chunked_upload, node_origin
+FROM tasks WHERE id = ?
+`
 
 	row := s.db.QueryRow(query, taskID)
 
@@ -652,6 +661,7 @@ SELECT
 		&task.MergeAfterDownload,
 		&task.MergeMethod,
 		&task.FFmpegMuxMode,
+		&task.MergeAllowMissingSeg,
 		&task.CompressAfterMerge,
 		&task.CompressBitrateThreshold,
 		&task.CompressTargetBitrate,
@@ -691,7 +701,7 @@ func (s *SQLiteStorage) GetAllTasks() ([]*model.Task, error) {
 		webdav_password, webdav_remote_dir, delete_after_upload,
 		total_segments, downloaded_segments, total_bytes, downloaded_bytes, key_path, play_url, work_dir,
 		created_at, COALESCE(completed_at, ''),
-		merge_after_download, merge_method, ffmpeg_mux_mode,
+		merge_after_download, merge_method, ffmpeg_mux_mode, merge_allow_missing_seg,
 		compress_after_merge, compress_bitrate_threshold, compress_target_bitrate,
 		hls_pack_enabled, hls_encrypt_enabled, hls_encrypt_mode, hls_key_url, hls_pack_form,
 		enable_chunked_upload, node_origin
@@ -742,6 +752,7 @@ func (s *SQLiteStorage) GetAllTasks() ([]*model.Task, error) {
 			&task.MergeAfterDownload,
 			&task.MergeMethod,
 			&task.FFmpegMuxMode,
+			&task.MergeAllowMissingSeg,
 			&task.CompressAfterMerge,
 			&task.CompressBitrateThreshold,
 			&task.CompressTargetBitrate,

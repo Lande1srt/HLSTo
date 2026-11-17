@@ -141,7 +141,7 @@ func (ds *DownloaderService) download(taskID string, req model.DownloadRequest) 
 		}
 		ds.taskManager.mu.Unlock()
 
-		ok, holding := ds.downloader(taskID, req.ThreadCount, key, cacheDir, tsList, ctrl, req.Referer, req.Cookie, downloadSem)
+		ok, holding := ds.downloader(taskID, req.ThreadCount, key, cacheDir, tsList, ctrl, req.Referer, req.Cookie, downloadSem, req.MergeAllowMissingSeg)
 		if !ok {
 			// 下载失败或被停止。若暂停期间已让出 downloadSem 且未重新持有，
 			// 必须告知收尾 defer 不要再释放，否则会错误释放其它任务正在使用的许可。
@@ -149,7 +149,7 @@ func (ds *DownloaderService) download(taskID string, req model.DownloadRequest) 
 			return
 		}
 
-		if ok := ds.checkTsDownDir(taskID, cacheDir, tsList, false); !ok {
+		if ok := ds.checkTsDownDir(taskID, cacheDir, tsList, false, req.MergeAllowMissingSeg); !ok {
 			ds.sendStatus(taskID, model.StatusFailed, "合并前检查失败: 文件不完整")
 			return
 		}
