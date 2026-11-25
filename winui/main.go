@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"m3u8-downloader-web/handler"
 	"m3u8-downloader-web/service"
@@ -22,7 +23,12 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/options/windows"
 )
 
-//go:embed static
+// 必须使用 all: 前缀：Go 的 go:embed 默认会忽略以 "." 或 "_" 开头的文件，
+// 而 Vite 产物中 Vue SFC 共享模块名为 "_plugin-vue_export-helper-*.js"。
+// 一旦漏嵌，AssetServer 返回 404，导致所有依赖它的懒加载组件模块加载失败，
+// 表现为桌面端点击导航无反应（服务端读磁盘目录不受影响，故仅 Wails 端复现）。
+//
+//go:embed all:static
 var assets embed.FS
 
 func main() {
@@ -44,6 +50,11 @@ func main() {
 	// 在打开窗口前启动监听，确保 WebView 首屏请求（含 WS）时端口已 accept
 	app.serveLocalAPI()
 
+	// 把 serverInfoHandler 挂到 router 上（AssetServer Handler 会路由到这里），
+	// 前端用相对路径 /api/wails/server-info 就能拿到真实 HTTP + WebSocket 端口，
+	// 完全绕开 Wails v2.17+ 绑定生成器对 Go 方法的静默过滤。
+	router.HandleFunc("/api/wails/server-info", app.serverInfoHandler).Methods("GET")
+
 	// 获取静态文件目录
 	staticDir := getStaticDir()
 	log.Printf("Static directory: %s", staticDir)
@@ -52,6 +63,24 @@ func main() {
 	staticFS, err := fs.Sub(assets, "static")
 	if err != nil {
 		log.Fatalf("Failed to create sub filesystem: %v", err)
+	}
+
+	// 启动校验：确认 assets 目录已正确嵌入（含 "_" 开头的 Vite 共享 chunk）。
+	// 若数量为 0 或明显偏少，说明 go:embed 规则/构建产物有问题，前端会白屏或点击无响应。
+	if entries, err := fs.ReadDir(staticFS, "assets"); err != nil {
+		log.Printf("[WinUI] 警告: 嵌入资源缺少 assets 目录: %v", err)
+	} else {
+		hasHelper := false
+		for _, e := range entries {
+			if strings.HasPrefix(e.Name(), "_plugin-vue_export-helper") {
+				hasHelper = true
+				break
+			}
+		}
+		log.Printf("[WinUI] 嵌入静态资源: assets 目录 %d 个文件, Vite 共享 chunk 存在=%v", len(entries), hasHelper)
+		if !hasHelper {
+			log.Printf("[WinUI] 警告: 未找到 _plugin-vue_export-helper，懒加载页面将无法渲染")
+		}
 	}
 
 	err = wails.Run(&options.App{
@@ -152,6 +181,7 @@ func createRouter() *mux.Router {
 			persisted.MergeAfterDownload,
 			persisted.MergeMethod,
 			persisted.FFmpegMuxMode,
+			persisted.MergeAllowMissingSeg,
 		)
 		downloaderService.UpdateHLSPackConfig(
 			persisted.HLSPackEnabled,

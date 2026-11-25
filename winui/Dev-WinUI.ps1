@@ -41,4 +41,6 @@ Write-Host "图标已应用: hlsto.ico -> build/windows/icon.ico" -ForegroundCol
 # 启动开发模式
 Write-Host "`n启动 Wails 开发模式..." -ForegroundColor Yellow
 Write-Host "应用将在窗口中启动" -ForegroundColor Yellow
-wails dev
+# 注意：-tags native_webview2loader 回退稳定的原生 loader（避免 v2.15+ 新 Go WebView2Loader 的窗口崩溃问题）
+#       -devtools-listen-port 让 Wails 打开 Devtools 服务器，方便调试 WebView2 内部报错
+wails dev -tags native_webview2loader

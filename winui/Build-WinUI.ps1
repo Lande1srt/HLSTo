@@ -47,8 +47,11 @@ Copy-Item -Path "hlsto.ico" -Destination "build/windows/icon.ico" -Force
 Write-Host "Icon applied: hlsto.ico -> build/windows/icon.ico" -ForegroundColor Green
 
 # 构建应用，应用平台为 Windows/amd64
+# 注意：Wails v2.15+ 默认启用新 Go WebView2Loader，某些机器上会导致窗口白屏/资源加载失败
+#       加上 -tags native_webview2loader 可回退到旧 loader（稳定、兼容好）
+#       待 v2.17+ 彻底修复 #2004 后可移除 -tags 参数
 Write-Host "`nBuilding Windows application..." -ForegroundColor Yellow
-wails build -platform windows/amd64
+wails build -platform windows/amd64 -tags native_webview2loader
 $buildExitCode = $LASTEXITCODE
 
 if ($buildExitCode -eq 0) {

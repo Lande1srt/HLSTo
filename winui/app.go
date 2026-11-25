@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"net"
 	"net/http"
@@ -22,6 +23,16 @@ type App struct {
 // NewApp 创建新的应用实例
 func NewApp() *App {
 	return &App{}
+}
+
+// serverInfoHandler 暴露给前端的 HTTP handler（AssetServer Handler 会路由到这里）。
+// 返回本地 HTTP 服务基址（REST + WebSocket 真实端口）。
+// 这样前端完全绕开 Wails v2.17+ 绑定生成器对 GetServerBaseURL/ServerPort 等方法
+// 的静默过滤——走 AssetServer 上已挂载的 HTTP 路由就能拿到真实端口。
+func (a *App) serverInfoHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]string{"baseURL": a.serverBaseURL})
 }
 
 // startup 在应用启动时调用
@@ -53,12 +64,6 @@ func (a *App) beforeClose(ctx context.Context) bool {
 	}
 	log.Println("HLSTo 应用程序即将关闭")
 	return false
-}
-
-// GetServerBaseURL 返回本地 HTTP 服务基址（如 http://127.0.0.1:51234），
-// 供前端在桌面环境下将 REST API 与 WebSocket 指向真实端口
-func (a *App) GetServerBaseURL() string {
-	return a.serverBaseURL
 }
 
 // Greet 演示 Wails 绑定方法
